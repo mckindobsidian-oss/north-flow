@@ -1,0 +1,13 @@
+{
+  "manifest_version": 3,
+  "name": "Focusly — Focus & Website Blocker",
+  "version": "0.1.0",
+  "description": "Focus sessions, distracting-site blocking and website screen-time, synced with your Focusly account.",
+  "permissions": ["storage", "alarms", "tabs", "notifications", "declarativeNetRequest"],
+  "host_permissions": ["<all_urls>"],
+  "background": { "service_worker": "background.js" },
+  "action": {
+    "default_popup": "popup.html",
+    "default_title": "Focusly"
+  }
+}

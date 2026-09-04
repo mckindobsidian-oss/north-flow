@@ -1,0 +1,11 @@
+{
+  "name": "focusly",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Focusly — an Apple-themed productivity ecosystem: web, browser extension, desktop and mobile clients sharing one account model.",
+  "scripts": {
+    "dev": "npm --prefix react-app run dev -- --config vite.preview.config.js",
+    "lint": "npm --prefix react-app run lint",
+    "preview": "npm --prefix react-app run preview"
+  }
+}

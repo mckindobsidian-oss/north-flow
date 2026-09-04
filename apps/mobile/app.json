@@ -1,0 +1,18 @@
+{
+  "expo": {
+    "name": "Focusly",
+    "slug": "focusly",
+    "version": "0.1.0",
+    "orientation": "portrait",
+    "userInterfaceStyle": "automatic",
+    "newArchEnabled": true,
+    "ios": {
+      "supportsTablet": true,
+      "bundleIdentifier": "com.focusly.mobile"
+    },
+    "android": {
+      "package": "com.focusly.mobile",
+      "edgeToEdgeEnabled": true
+    }
+  }
+}

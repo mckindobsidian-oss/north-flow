@@ -1,0 +1,25 @@
+# Dependencies
+node_modules/
+
+# Build outputs
+dist/
+target/
+.expo/
+web-build/
+
+# Preview / tooling noise
+.freebuff/*.log
+.freebuff/*.log.err
+.freebuff/preview-*
+
+# OS / editor
+.DS_Store
+Thumbs.db
+*.swp
+
+# Secrets (never commit)
+.env
+.env.local
+.env.*.local
+*.p12
+*.key
