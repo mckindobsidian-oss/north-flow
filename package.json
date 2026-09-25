@@ -11,6 +11,7 @@
     "sync:shared": "node scripts/sync-shared.mjs",
     "check:shared": "node scripts/sync-shared.mjs --check",
     "check:jsx": "node scripts/check-jsx.mjs",
-    "test": "node --test tests/*.test.mjs"
+    "test": "node --test tests/*.test.mjs",
+    "verify:rls": "node scripts/verify-rls.mjs"
   }
 }

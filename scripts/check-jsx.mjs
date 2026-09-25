@@ -40,6 +40,7 @@ const FILES = [
   "packages/shared-types/blocking.js",
   "packages/shared-types/account.js",
   "scripts/sync-shared.mjs",
+  "scripts/verify-rls.mjs",
 ];
 
 // Native-only modules are not installed here (see scripts/stubs/native-stub.js);

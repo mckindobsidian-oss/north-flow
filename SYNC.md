@@ -10,6 +10,44 @@ extension, desktop and mobile clients keep everything on the device (see the
 last section). So "syncs" below means "syncs between web sessions on different
 devices", which today is the whole of the working ecosystem.
 
+## 0. The path a change takes
+
+```
+screen → S.* (storage boundary) → local cache ─────────────→ screens re-read it
+                                 ↘ SYNC.afterWrite (if signed in)
+                                    → sync-map.js     translate + fingerprint
+                                    → sync.js         queue + push handlers
+                                    → PostgREST       policy check (RLS)
+                                    → Postgres tables
+
+sign-in / boot → SYNC.bootstrap → push this device first, then pull the account
+                                → local cache → screens
+```
+
+Four files matter, and only one of them knows about the network:
+
+| File | Responsibility |
+|---|---|
+| `react-app/src/focusly.jsx` (`S`) | The single storage boundary. Every screen goes through it. Resolves `window.storage` → `localStorage` → in-memory. |
+| `react-app/src/lib/sync-map.js` | Pure translation: app shape ⇄ table row, plus the change fingerprint. No network, no DOM — this is the half covered by `tests/sync.test.mjs`. |
+| `react-app/src/lib/sync.js` | The engine: pending queue, push handlers, pull, leaderboard RPC. |
+| `supabase/schema.sql` | Tables, constraints, triggers and RLS — the only place security is actually enforced. |
+
+### What is written locally — every key the app uses
+
+| Key | Holds | Also pushed? |
+|---|---|---|
+| `u:<user>` | the whole profile document: name, email, tasks, apps, friends, pomodoro, blocking rules/schedules/settings | **yes** |
+| `bd:<user>` | kanban boards | **yes** |
+| `fs:<user>:<date>` | raw focus-session records for that day | **yes** (insert-only) |
+| `fo:<user>:<date>` | daily focus total in seconds | no — derived by the database trigger |
+| `lb:<user>` (shared) | this account's leaderboard row (fm/tc/streak/last/name) | no — the server aggregate is authoritative |
+| `lb:<other>` (shared) | other accounts' leaderboard rows, written by the pull | no |
+| `sess` | `{ un }` — who this device is, so the app boots with no network | no |
+| `fl_th` | theme choice (`"0"`/`"1"`) | no — **Step 4's job** |
+| `fl_ctx` | right-click menu preference | no |
+| `north:syncq` | the pending-push queue | n/a — this *is* the queue |
+
 ## 1. Data that syncs to the account
 
 | App data | Trigger key | Postgres destination | Direction |
@@ -70,7 +108,52 @@ server cannot erase a locally-tracked streak. The trade-off is accepted and
 deliberate: the aggregate is authoritative for *public* numbers, the device is
 authoritative for *private* ones.
 
-## 5. Clients that do not sync at all
+## 5. Offline queue and conflict behaviour
+
+### The offline queue
+
+The queue stores **key names, not values** (`localStorage["north:syncq"]` is a
+deduplicated list of strings). That is the design's main trick: the value is
+already in the local cache, so the queue can never hold a stale copy of the
+data — it only remembers *what* still needs sending.
+
+Sequence for one edit:
+
+1. The screen calls `S.set(key, value)`. The local cache is written first, so
+   the UI never waits on a network round trip and works with no connection.
+2. `SYNC.afterWrite(key)` adds the key to the queue — unless the app is signed
+   out, no project is configured, or a pull is in progress (a pull must never
+   echo back as a write).
+3. A 900 ms debounce then runs `flush()`, which walks the queue and calls the
+   matching push handler for each key.
+4. Any key whose push fails is written back into the queue for the next attempt.
+   Failures are logged with a `[north sync]` prefix and never thrown at the UI.
+
+**Retry is not a background timer.** A pending change is retried on the next
+flush: any subsequent edit, or the next time the app starts and signs in. Close
+the tab on a plane and the work is still queued on the disk when you come back.
+When the account changes, the queue is cleared — those keys belong to the
+previous account and must not leak into the new one.
+
+### Conflict behaviour
+
+Whole-record, **last write wins**, per storage key. Stated plainly, with its
+limits:
+
+| Data | Conflict rule |
+|---|---|
+| Tasks, boards | Synced by id, then a prune deletes server rows whose ids are no longer present. The last device to push wins **wholesale** — there is no per-field merge. |
+| Profile document | Pushed as one document; same rule. |
+| Focus sessions | **No conflicts possible.** Insert-only and idempotent by uuid: a session is an event, never rewritten. |
+| `daily_focus` | **No conflicts possible.** Derived server-side from the sessions, so it is a function of data that cannot disagree. |
+| Leaderboard | Server aggregate wins for public numbers; the device wins for its own streak/task count (explicitly merged in `leaderboard()`). |
+
+The honest limitation: two devices editing the same task while both are offline
+will see one overwrite the other, whichever flushes second. There are no vector
+clocks and no per-field reconciliation. For one person on several devices that
+is a reasonable trade; it would not be for collaborative editing.
+
+## 6. Clients that do not sync at all
 
 | Client | Where its data actually lives | What it would need |
 |---|---|---|
@@ -78,7 +161,27 @@ authoritative for *private* ones.
 | Desktop app | `north-blocking.json` in the OS app-config dir | Sign-in, and a build that has ever been compiled |
 | Mobile app | React state only — **lost on every restart** | `AsyncStorage` first, then sign-in |
 
-## 6. How to verify any of this yourself
+## 7. How to verify any of this yourself
+
+### Automatically, from two accounts
+
+```bash
+NORTH_A_EMAIL=... NORTH_A_PASSWORD=... \
+NORTH_B_EMAIL=... NORTH_B_PASSWORD=... npm run verify:rls
+```
+
+`scripts/verify-rls.mjs` signs in as two real accounts and attacks them through
+the same client the app ships and the same PostgREST endpoint the browser calls.
+It asserts every isolation claim in this document, plus the full sync
+round-trip, and prints PASS/FAIL per check. Credentials come from the
+environment only — never from the repository. With none set it prints what is
+missing and exits 0, so it is safe anywhere.
+
+It is intentionally **not** part of `npm test`: routine test runs must never
+write to a live database. It creates a small set of marker-tagged rows and
+deletes exactly those ids afterwards.
+
+### By hand
 
 The two behaviours worth confirming by hand, once you have two accounts:
 

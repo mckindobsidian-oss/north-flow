@@ -25,17 +25,30 @@ begin;
 revoke execute on function public.current_streak(uuid) from anon, public;
 grant  execute on function public.current_streak(uuid) to authenticated, service_role;
 
--- ── 2. trigger functions: deliberately NOT revoked ───────────────────────
--- handle_new_user(), sync_daily_focus() and touch_updated_at() are SECURITY
--- DEFINER trigger functions that also inherit PUBLIC EXECUTE. They are not
--- exploitable through the API — PostgreSQL refuses a direct call with "trigger
--- functions can only be called as triggers" — so no grant is changed here.
--- Revoking EXECUTE on handle_new_user() was considered and rejected as
--- unnecessary risk on the single most important path (account creation).
--- slug_username(text) is immutable and reads nothing, so it stays reachable.
+-- ── 2. trigger functions and slug_username: verified safe, NOT revoked ────
+-- Every function in the public schema was probed with the anon key. Results:
 --
--- This is a deliberate "leave it alone" decision, recorded so the next person
--- does not have to re-derive it.
+--   leaderboard(integer)    401 42501 permission denied   -> correctly revoked
+--   current_streak(uuid)    200 "0"                      -> FIXED BY SECTION 1
+--   slug_username(text)     200 "abc.de"                 -> harmless, see below
+--   handle_new_user()       404 PGRST202                  -> not reachable (a)
+--   sync_daily_focus()      404 PGRST202                  -> not reachable (a)
+--   touch_updated_at()      404 PGRST202                  -> not reachable (a)
+--
+-- (a) The three trigger functions are not merely unexploitable by nature —
+--     PostgREST cannot resolve them as callable endpoints at all. They take no
+--     arguments, so /rpc/<name> matches no signature and returns 404. Nothing
+--     to revoke.
+--
+-- slug_username(text) IS reachable by anon and returns its input slugged. It is
+-- an IMMUTABLE pure string function that reads no table, so it discloses
+-- nothing. It is deliberately LEFT ALONE for a specific reason: the same
+-- function is used by the CHECK constraint `profiles_un_lowercase` on
+-- profiles, i.e. it sits on the account-creation path. Revoking EXECUTE to
+-- reduce an already-zero attack surface is not worth any risk to the single
+-- most important write in the system.
+--
+-- Recorded so the next person does not have to re-derive it.
 
 -- ── 3. confirm the result ────────────────────────────────────────────────
 -- Both columns must read `false`. If either is true, the revoke above did not
