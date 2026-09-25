@@ -14,6 +14,16 @@
 -- usernames, then run each transaction one at a time.
 -- ══════════════════════════════════════════════════════════════════════════
 
+-- ── 0. find the two account ids to paste into every block below ──────────
+-- Run this on its own first. Copy `id` from the first two rows and replace
+-- 00000000-0000-0000-0000-000000000001 and ...-0002 in the blocks that
+-- follow. Two accounts must exist for any of this to mean anything: sign up
+-- twice through the app (and confirm both emails) before running it.
+select id, email, coalesce(raw_user_meta_data ->> 'name', '') as name, created_at
+from auth.users
+order by created_at
+limit 2;
+
 -- ── 1. profiles: you cannot read anyone else's row ────────────────────────
 begin;
 set local role authenticated;
