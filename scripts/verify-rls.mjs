@@ -58,7 +58,10 @@ const MARK = `north-rls-check-${Date.now().toString(36)}`;
 function loadEnvFile(path) {
   const vars = {};
   if (!existsSync(path)) return vars;
-  for (const line of readFileSync(path, "utf8").split("\n")) {
+  // \r?\n: Windows editors save CRLF, and a trailing \r would otherwise glue
+  // itself onto the last value (or break the `(.*)$` match, since JS `.` never
+  // matches \r) — which silently dropped every key but the final line.
+  for (const line of readFileSync(path, "utf8").split(/\r?\n/)) {
     const m = /^\s*([A-Z0-9_]+)\s*=\s*(.*)$/.exec(line);
     if (m) vars[m[1]] = m[2].trim().replace(/^["']|["']$/g, "");
   }
@@ -141,8 +144,11 @@ async function expectRefused(fn, what) {
   return `refused: ${res.error.code || res.error.message}`;
 }
 
-/** Rows visible to `client` in `table`, filtered by owner id where given. */
-async function rows(client, table, ownerColumn, ownerId, select = "id") {
+/** Rows visible to `client` in `table`, filtered by owner id where given.
+ *  No default select: `daily_focus` and `friends` are keyed by (user_id, day)
+ *  and (user_id, friend_un) and have no `id` column, so a caller picks columns
+ *  that exist ("*" is always safe). */
+async function rows(client, table, ownerColumn, ownerId, select = "*") {
   let q = client.from(table).select(select);
   if (ownerColumn && ownerId) q = q.eq(ownerColumn, ownerId);
   const { data, error } = await q;
@@ -320,7 +326,7 @@ const taskId = crypto.randomUUID();
 const sessionId = crypto.randomUUID();
 
 await check("profile settings document round-trips", async () => {
-  const before = await A.from("profiles").select("settings").eq("id", idA).single();
+  const before = await A.from("profiles").select("settings, un").eq("id", idA).single();
   expect(!before.error, `could not read own profile: ${before.error?.message}`);
   settingsBackup = before.data.settings;
 
@@ -334,10 +340,12 @@ await check("profile settings document round-trips", async () => {
       settings: { blockDuringFocus: true, allowTemporaryUnblock: true, tempUnblockMinutes: 3 },
     },
   };
-  const wrote = await A.from("profiles").upsert({ id: idA, settings }, { onConflict: "id" });
+  // `un` is NOT NULL on profiles — the app's own pushProfileRow sends it for
+  // exactly this reason (sync.js), so the harness replays that shape.
+  const wrote = await A.from("profiles").upsert({ id: idA, un: before.data.un, settings }, { onConflict: "id" });
   expect(!wrote.error, `settings push failed: ${wrote.error?.message}`);
 
-  const back = await A.from("profiles").select("settings").eq("id", idA).single();
+  const back = await A.from("profiles").select("settings, un").eq("id", idA).single();
   expect(back.data?.settings?.pm?.w === 50, "pm did not survive the round trip");
   expect(back.data?.settings?.blocking?.rules?.[0]?.target === "example.com", "blocking rules did not survive");
   expect(back.data?.settings?.apps?.[0]?.name === MARK, "tracked apps did not survive");
