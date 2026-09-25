@@ -1,9 +1,31 @@
 import { useState, useEffect, useRef } from "react";
 import {
-  Calendar, Check, ChevronDown, ChevronLeft, ChevronRight, Flame,
-  Home as HomeIcon, LayoutGrid, ListChecks, Pause, PenLine, Play, Plus,
-  RotateCcw, Shield, SkipForward, Timer, Trash2, Users, X, Zap,
+  Calendar, Check, ChevronDown, ChevronLeft, ChevronRight, Compass,
+  Flame, Home as HomeIcon, LayoutGrid, ListChecks, Moon, Pause, PenLine, Play,
+  Plus, RotateCcw, Settings, Shield, SkipForward, Sun, Timer, Trash2, Users, X, Eye, EyeOff
 } from "lucide-react";
+import { supabase, supabaseConfigured } from "./lib/supabase.js";
+// Shared-with-every-client modules (generated copies of packages/shared-types —
+// see scripts/sync-shared.mjs). The account mapper and the blocking engine live
+// there so the web app, the extension and the phone can never disagree about
+// who the user is or what should be blocked.
+import {
+  migrateLegacy, normalizeHost, normalizeApp, newRule, newSchedule, rulesByKind,
+  normalizeState,
+  describeBlocking, evaluateBlocking, upsertRule, removeRule, setRuleEnabled,
+  upsertSchedule, removeSchedule, unblockUntil,
+  RULE_WHEN_LABEL, WORKDAYS, WEEKDAY_LABELS, CLIENT_CAPABILITIES, defaultBlocking,
+  startFocus as startFocusSession,
+} from "./shared/blocking.js";
+import {
+  PROFILE_KEY, SESSION_KEY, toAppUser, defaultProfile, hydrateProfile, initial,
+  usernameFromEmail, displayName,
+} from "./shared/account.js";
+// The backend. `createSync` translates the app's storage keys into the tables in
+// supabase/schema.sql and mirrors every write; the local store below stays the
+// instant, offline-capable cache in front of it. Nothing else in the UI changes.
+import { createSync, newUuid } from "./lib/sync.js";
+
 
 // ── DESIGN TOKENS ──────────────────────────────────────────────────────
 // Two palettes (light + dark); `K` points at the active one and is swapped
@@ -31,6 +53,10 @@ const D = {
   sh3: "0 -6px 12px rgba(0, 0, 0, 0.45)",
 };
 let K = L; // active palette — App reassigns this before rendering on toggle
+// Active right-click policy for this render pass (same pattern as `K`). It is a
+// VIEW preference only — it never changes what is blocked — and its default,
+// "native", means NORTH does not touch the browser's own menu at all.
+let CTX = "native";
 
 // System-first type stack. Apple's SF Pro is licensed only for Apple
 // platforms (and can't be embedded in a web app), so the authentic approach
@@ -85,6 +111,11 @@ const pick = () => {
   }
   return (cache = memStore());
 };
+// The backend mirror, created immediately below once `S` exists. Declared here
+// (before S) so `S`'s methods can reference it without a temporal-dead-zone
+// error on the very first call.
+let SYNC = null;
+
 const S = {
   async get(key, shared = false) {
     try { const r = await pick().get(key, shared); return r ? JSON.parse(r.value) : null; }
@@ -92,18 +123,33 @@ const S = {
   },
   async set(key, val, shared = false) {
     try { await pick().set(key, JSON.stringify(val), shared); } catch {}
+    // Mirror the change to the account's backend — a no-op when signed out or
+    // when no Supabase project is configured, and never awaited: recording a
+    // task must not wait on a network round trip. `sync.js` queues the push and
+    // retries it until it lands, so an offline edit is not lost.
+    if (SYNC) SYNC.afterWrite(key, shared);
   },
   async del(key, shared = false) {
     try { await pick().delete(key, shared); } catch {}
   },
   async list(prefix, shared = false) {
+    // The leaderboard is the one shared list that must be live rather than
+    // cached: it is an aggregate on the server, not rows this device holds.
+    if (shared && prefix === "lb:" && SYNC && SYNC.ready()) {
+      await SYNC.leaderboard().catch(() => {});
+    }
     try { const r = await pick().list(prefix, shared); return r?.keys || []; }
     catch { return []; }
   },
 };
 
+SYNC = createSync({ store: S });
+
 // ── HELPERS ──────────────────────────────────────────────────────────────
-const uid  = () => Math.random().toString(36).slice(2, 9);
+// Ids are UUIDs: the database's primary keys are `uuid`, so the same id is
+// valid on every client and each write becomes idempotent (a focus session
+// pushed twice updates one row instead of creating a duplicate).
+const uid  = () => newUuid();
 const pad2 = (n) => String(n).padStart(2, "0");
 const today = () => {
   const d = new Date();
@@ -132,114 +178,626 @@ const tag = (active, col) => ({
   color: active ? col : K.sub,
 });
 
+// ── RIGHT-CLICK / CONTEXT MENU ───────────────────────────────────────────
+// NORTH does not override the browser's context menu unless asked to: "native"
+// is the default, and on that setting no handler calls preventDefault anywhere.
+// The preference exists because some people would rather get the app's own
+// actions on a card they right-click. Two rules hold in both modes:
+//   · Text fields always keep the native menu. Paste, spell-check, autofill and
+//     "search with…" live there; taking them away costs the user more than it
+//     gives NORTH, and nothing here should weaken that.
+//   · Wherever NORTH has no action to offer, the native menu is allowed through.
+const CTX_MODES = [
+  { id: "native", lbl: "Browser",    hint: "The browser's own menu everywhere. Nothing is intercepted." },
+  { id: "north",  lbl: "NORTH menu", hint: "NORTH's own actions when you right-click a task or a block rule." },
+];
+const ctxMode = (raw) => (CTX_MODES.some((m) => m.id === raw) ? raw : "native");
+const readCtxPreference = () => {
+  try { return ctxMode(localStorage.getItem("fl_ctx")); } catch { return "native"; }
+};
+
+/** True when the native menu must be left untouched (editable field, or native mode). */
+const keepNativeMenu = (el) => {
+  if (CTX !== "north") return true;
+  const t = el?.tagName;
+  return t === "INPUT" || t === "TEXTAREA" || t === "SELECT" || el?.isContentEditable === true;
+};
+
+/** Per-screen context-menu state. `openMenu` is a no-op unless the device asked for NORTH's menu. */
+const useContextMenu = () => {
+  const [menu, setMenu] = useState(null);
+  const closeMenu = () => setMenu(null);
+  const openMenu = (e, items) => {
+    if (keepNativeMenu(e.target) || !items || !items.length) return;
+    e.preventDefault();
+    setMenu({ x: e.clientX, y: e.clientY, items });
+  };
+  return { menu, openMenu, closeMenu };
+};
+
+// NORTH's own menu: fixed-position, clamped to the viewport, dismissed by Esc,
+// an outside press, a scroll or by picking an item. It never traps focus, and
+// it never suppresses the native menu anywhere else.
+const ContextMenu = ({ menu, onClose }) => {
+  const ref = useRef(null);
+  const closeRef = useRef(onClose);
+  closeRef.current = onClose;
+  const [pos, setPos] = useState(null);
+
+  useEffect(() => {
+    if (!menu) { setPos(null); return undefined; }
+    const inside = (e) => ref.current && ref.current.contains(e.target);
+    const away = (e) => { if (!inside(e)) closeRef.current(); };
+    const onKey = (e) => { if (e.key === "Escape") closeRef.current(); };
+    window.addEventListener("pointerdown", away, true);
+    window.addEventListener("scroll", away, true);
+    window.addEventListener("resize", away);
+    window.addEventListener("keydown", onKey);
+    return () => {
+      window.removeEventListener("pointerdown", away, true);
+      window.removeEventListener("scroll", away, true);
+      window.removeEventListener("resize", away);
+      window.removeEventListener("keydown", onKey);
+    };
+  }, [menu]);
+
+  // Measure once mounted, then keep the panel inside the window.
+  useEffect(() => {
+    if (!menu || !ref.current) return;
+    const r = ref.current.getBoundingClientRect();
+    setPos({
+      left: Math.max(8, Math.min(menu.x, window.innerWidth - r.width - 8)),
+      top:  Math.max(8, Math.min(menu.y, window.innerHeight - r.height - 8)),
+    });
+  }, [menu]);
+
+  if (!menu) return null;
+  return (
+    <div ref={ref} role="menu" aria-label="NORTH actions"
+      style={{
+        position: "fixed", left: pos ? pos.left : menu.x, top: pos ? pos.top : menu.y,
+        visibility: pos ? "visible" : "hidden", zIndex: 60, minWidth: 184,
+        padding: 5, borderRadius: 12, background: K.card,
+        border: `1px solid ${K.border}`, boxShadow: K.sh2,
+      }}>
+      {menu.items.map((it) => (
+        <button key={it.lbl} type="button" role="menuitem" className="b"
+          onClick={() => { closeRef.current(); it.run(); }}
+          style={{
+            display: "block", width: "100%", textAlign: "left",
+            padding: "7px 9px", borderRadius: 8, fontSize: 12.5,
+            color: it.danger ? K.err : K.txt,
+          }}>{it.lbl}</button>
+      ))}
+    </div>
+  );
+};
+
 // Small injected stylesheet (hover/press/focus need real CSS, inline styles
 // can't do :hover). Rendered with the active palette by every top-level view.
+// Follows the apple-design skill: response on pointer-down (instant press),
+// transform/opacity-only motion, calm page arrival, and OS motion + trans-
+// parency preferences honored instead of fought.
 const G = (dark) => (
   <style>{`
     :root { color-scheme: ${dark ? "dark" : "light"}; }
     body { background: ${K.bg}; font-family: ${FONT}; -webkit-font-smoothing: antialiased; text-rendering: optimizeLegibility; }
     button, input, select, textarea { font-family: inherit; }
+    /* Press physics: instant feedback on pointer-down, settle on release.
+       Springs (critically damped, no overshoot) ≈ cubic-bezier(.2,.8,.3,1). */
     .b { font: inherit; color: inherit; background: none; border: 0; padding: 0; margin: 0;
-         cursor: pointer; text-align: center; line-height: inherit; transition: transform .12s ease;
-         -webkit-tap-highlight-color: transparent; }
-    .b:active { transform: scale(.96); }
+         cursor: pointer; text-align: center; line-height: inherit;
+         transition: transform .12s cubic-bezier(.2,.8,.3,1), opacity .15s ease;
+         -webkit-tap-highlight-color: transparent; will-change: transform; }
+    .b:active { transform: scale(.955); }
+    .b:disabled { cursor: default; }
     .b:focus-visible, input:focus-visible, select:focus-visible {
       outline: 2px solid ${K.acc}; outline-offset: 2px; border-radius: 6px; }
     ::selection { background: ${K.acc}30; }
+    /* Page arrival: settle a hair upward with a quick fade — opacity +
+       transform only, so it never paints layout. Reduced motion → no slide. */
+    .pge { animation: pge .24s cubic-bezier(.2,.8,.3,1) both; }
+    @keyframes pge { from { opacity: 0; transform: translateY(5px); } to { opacity: 1; transform: none; } }
+    /* Respect OS motion + transparency preferences (apple-design skill).
+       Reduced motion swaps motion for plain opacity/color state changes. */
+    @media (prefers-reduced-motion: reduce) {
+      /* Replace motion with a short opacity-only cross-fade (skill §14). */
+      .pge { animation: pgeFade .18s ease both; }
+      @keyframes pgeFade { from { opacity: 0; } to { opacity: 1; } }
+      .b { transition: opacity .1s ease; }
+      .b:active { transform: none; }
+    }
+    /* Frosted chrome becomes solid when the OS asks for less transparency. */
+    @media (prefers-reduced-transparency: reduce) {
+      .mtrl { background: ${dark ? "#1C1C1E" : "#FFFFFF"} !important; backdrop-filter: none !important; -webkit-backdrop-filter: none !important; }
+    }
+    /* Desktop hover: a quiet tint previews the press (web complements the
+       touch-only press feedback with a hover state — skill §1/§10). */
+    .nv:not([aria-current]):hover { background: ${K.border}55 !important; }
+    .nv:not([aria-current]):active { transform: scale(.97); }
   `}</style>
+);
+
+// ══════════════════════════════════════════════════════════════════════════
+// THEME SWITCH
+// ══════════════════════════════════════════════════════════════════════════
+// Device preferences. Deliberately small and local: these are settings that
+// belong to THIS device (like the theme), never to the account, so they are
+// not synced and are never part of the shared blocking/account model.
+function Preferences({ ctx, onCtx }) {
+  const [open, setOpen] = useState(false);
+  const ref = useRef(null);
+
+  useEffect(() => {
+    if (!open) return undefined;
+    const away = (e) => { if (!ref.current || !ref.current.contains(e.target)) setOpen(false); };
+    const onKey = (e) => { if (e.key === "Escape") setOpen(false); };
+    window.addEventListener("pointerdown", away, true);
+    window.addEventListener("keydown", onKey);
+    return () => {
+      window.removeEventListener("pointerdown", away, true);
+      window.removeEventListener("keydown", onKey);
+    };
+  }, [open]);
+
+  const active = CTX_MODES.find((m) => m.id === ctx) || CTX_MODES[0];
+
+  return (
+    <div ref={ref} style={{ position: "relative" }}>
+      <button type="button" className="b" onClick={() => setOpen((v) => !v)}
+        aria-expanded={open} aria-haspopup="dialog" aria-label="Preferences" title="Preferences"
+        style={{
+          display: "flex", alignItems: "center", justifyContent: "center",
+          width: 28, height: 26, borderRadius: 999,
+          background: K.surf, border: `1px solid ${K.border}`, color: K.sub,
+        }}>
+        <Settings size={14} strokeWidth={2.2} aria-hidden="true" />
+      </button>
+
+      {open && (
+        <div role="dialog" aria-label="Preferences"
+          style={{
+            position: "absolute", right: 0, top: "calc(100% + 8px)", zIndex: 50,
+            width: 272, padding: 12, borderRadius: 14, background: K.card,
+            border: `1px solid ${K.border}`, boxShadow: K.sh2,
+          }}>
+          <div style={{ fontSize: 10, letterSpacing: 0.6, color: K.sub, marginBottom: 8 }}>
+            RIGHT-CLICK MENU
+          </div>
+          <div role="radiogroup" aria-label="Right-click menu"
+            style={{ display: "flex", background: K.surf, borderRadius: 10, padding: 3, border: `1px solid ${K.border}`, marginBottom: 8 }}>
+            {CTX_MODES.map((m) => (
+              <button key={m.id} type="button" role="radio" aria-checked={ctx === m.id}
+                className="b" onClick={() => onCtx(m.id)}
+                style={{
+                  flex: 1, padding: "6px 0", borderRadius: 8, fontSize: 11.5, fontWeight: 600,
+                  background: ctx === m.id ? K.card : "transparent",
+                  color: ctx === m.id ? K.txt : K.sub,
+                  boxShadow: ctx === m.id ? K.sh1 : "none", transition: "all .2s",
+                }}>{m.lbl}</button>
+            ))}
+          </div>
+          <p style={{ fontSize: 10.5, color: K.muted, margin: 0, lineHeight: 1.55 }}>
+            {active.hint} Text fields always keep the browser's menu. Saved on this device only.
+          </p>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// Visible sun/switch/moon control (user requirement — default theme is light).
+const ThemeSwitch = ({ dark, onToggle }) => (
+  <button type="button" className="b" role="switch" aria-checked={dark}
+    aria-label={dark ? "Switch to light theme" : "Switch to dark theme"}
+    title={dark ? "Light theme" : "Dark theme"}
+    onClick={onToggle}
+    style={{
+      display: "flex", alignItems: "center", gap: 6, padding: "4px 9px", borderRadius: 999,
+      background: K.surf, border: `1px solid ${K.border}`,
+      color: K.sub, fontSize: 12, fontWeight: 600,
+    }}>
+    <Sun size={13} strokeWidth={2.2} color={dark ? K.muted : K.warn} aria-hidden="true" />
+    <span aria-hidden="true" style={{
+      position: "relative", width: 32, height: 19, borderRadius: 999, flexShrink: 0,
+      background: dark ? K.acc : K.muted + "66", transition: "background .2s",
+    }}>
+      <span style={{
+        position: "absolute", top: 2, left: dark ? 15 : 2, width: 15, height: 15,
+        borderRadius: "50%", background: "#fff", boxShadow: "0 1px 2px rgba(0,0,0,.25)",
+        transition: "left .18s ease",
+      }} />
+    </span>
+    <Moon size={13} strokeWidth={2.2} color={dark ? K.acc : K.muted} aria-hidden="true" />
+  </button>
 );
 
 // ══════════════════════════════════════════════════════════════════════════
 // AUTH
 // ══════════════════════════════════════════════════════════════════════════
-function Auth({ onLogin, dark }) {
-  const [mode, setMode] = useState("login");
-  const [f, setF] = useState({ user: "", pass: "", name: "" });
+// Credentials are Supabase's job; this component never builds a user object.
+// It validates input, calls the account service, and hands the Supabase user
+// up to App, which maps it once through the shared `toAppUser` (that single
+// mapper is what keeps the same person on the same key on every device).
+//
+// Until this device has real Supabase credentials (.env.local still holds the
+// placeholder values), `supabase` is null. Saying so beats throwing: the rest
+// of the app is fully usable without an account service.
+const NO_ACCOUNTS =
+  "Account service isn't set up yet. Add your Supabase project URL and anon key to react-app/.env.local (see SETUP.md), then restart the dev server.";
+
+// Pacing for the "resend confirmation email" button, in seconds. This is a UI
+// timer ONLY: Supabase's own email rate limit is longer, is enforced by the
+// service, and reports itself through an error we surface verbatim. The copy
+// around this number must never claim otherwise.
+const RESEND_WAIT = 5;
+
+/**
+ * One auth text field.
+ *
+ * Defined at MODULE scope deliberately. A component created inside `Auth` is a
+ * different function on every render, so React compares element types, sees a
+ * new one, and unmounts + remounts the whole subtree — destroying the <input>
+ * DOM node and dropping the caret. That is precisely what made these fields
+ * lose focus after a single character. A stable component type keeps one DOM
+ * node per field, so typing stays continuous.
+ */
+const AuthField = ({ ph, t = "text", autoComplete, value, onChange, onEnter, reveal, onToggleReveal }) => (
+  <div style={{ position: "relative" }}>
+    <input type={t === "password" && reveal ? "text" : t}
+      placeholder={ph}
+      value={typeof value === "string" ? value : ""}
+      onChange={(e) => onChange(e.target.value)}
+      autoComplete={autoComplete}
+      onKeyDown={(e) => { if (e.key === "Enter") onEnter(); }}
+      style={{ ...inpSt(), paddingRight: t === "password" ? 40 : 12 }} />
+    {t === "password" && (
+      <button type="button" className="b" onClick={onToggleReveal}
+        aria-pressed={!!reveal} aria-label={reveal ? "Hide password" : "Show password"}
+        title={reveal ? "Hide password" : "Show password"}
+        style={{ position: "absolute", right: 10, top: "50%", transform: "translateY(-50%)", color: K.sub }}>
+        {reveal ? <EyeOff size={16} /> : <Eye size={16} />}
+      </button>
+    )}
+  </div>
+);
+
+function Auth({ onLogin, dark, onTheme }) {
+  const [mode, setMode] = useState("login"); // "login" | "register"
+  const [f, setF] = useState({ pass: "", name: "", email: "", userTouched: false });
   const [err, setErr] = useState("");
+  const [info, setInfo] = useState("");
   const [busy, setBusy] = useState(false);
-  const set = (k) => (e) => setF((x) => ({ ...x, [k]: e.target.value }));
+
+  const [passVisible, setPassVisible] = useState(false);
+  // Address the confirmation email was sent to, plus the resend pacing timer.
+  // Kept as plain state: it is a view concern, and nothing here is ever written
+  // to storage or to the account record.
+  const [sentTo, setSentTo] = useState("");
+  // Wall-clock deadline rather than a decremented counter — same rule the Focus
+  // timer follows. A countdown that counts its own ticks drifts (background
+  // tabs throttle timers), so the number shown is always derived from the clock.
+  const [resendAt, setResendAt] = useState(0);
+  const [, bumpClock] = useState(0);
+  const cooldown = resendAt ? Math.max(0, Math.ceil((resendAt - Date.now()) / 1000)) : 0;
+  const waiting = cooldown > 0;
+
+  const togglePassVisible = () => setPassVisible(!passVisible);
+  const armResend = () => setResendAt(Date.now() + RESEND_WAIT * 1000);
+
+  useEffect(() => {
+    if (!waiting) return undefined;
+    const id = setInterval(() => bumpClock((n) => n + 1), 250);
+    return () => clearInterval(id);
+  }, [waiting]);
+
+  // No username is collected or guessed here: the shared mapper derives it
+  // from the email (or the account id) so it is identical on every device.
+  const switchMode = (m) => { setMode(m); setErr(""); setInfo(""); };
 
   const submit = async () => {
-    if (!f.user || !f.pass || (mode === "register" && !f.name))
-      return setErr("Fill all fields.");
-    setBusy(true); setErr("");
-    const un  = f.user.toLowerCase().trim();
-    const key = `u:${un}`;
-    const ex  = await S.get(key);
-
+    // Enter inside a field calls this directly and bypasses the disabled button,
+    // so the guard has to live here too or a held key could fire the request
+    // repeatedly. Sign-in and sign-up both pass through this one check.
+    if (busy) return;
+    if (!supabaseConfigured) { setErr(NO_ACCOUNTS); setInfo(""); return; }
+    setBusy(true); setErr(""); setInfo("");
     if (mode === "login") {
-      if (!ex)            { setErr("User not found."); return setBusy(false); }
-      if (ex.pw !== f.pass) { setErr("Wrong password."); return setBusy(false); }
-      onLogin({ un, ...ex });
+      if (!f.email || !f.pass) { setErr("Email and password required."); setBusy(false); return; }
+      const { data, error } = await supabase.auth.signInWithPassword({
+        email: f.email,
+        password: f.pass,
+      });
+      if (error) { setErr(error.message); setBusy(false); return; }
+      await onLogin(data.user);
     } else {
-      if (ex) { setErr("Username taken."); return setBusy(false); }
-      const data = { pw: f.pass, name: f.name.trim(), tasks: [], apps: [], friends: [], pm: { w: 25, sb: 5, lb: 15 } };
-      await S.set(key, data);
-      await S.set(`lb:${un}`, { name: f.name.trim(), fm: 0, tc: 0, streak: 0, last: today() }, true);
-      onLogin({ un, ...data });
+      if (!f.name || !f.email || !f.pass) { setErr("Fill in every field."); setBusy(false); return; }
+      const { data, error } = await supabase.auth.signUp({
+        email: f.email,
+        password: f.pass,
+        // Carried as metadata so `toAppUser` can name the profile without
+        // asking the user twice on any client.
+        options: { data: { name: f.name.trim() } }
+      });
+      if (error) { setErr(error.message); setBusy(false); return; }
+      if (data?.session?.user) {
+        // Confirmation is switched off on this project → we are already signed
+        // in. Hand the account up and let App create the profile record.
+        await onLogin(data.session.user);
+        return;
+      }
+      setSentTo(f.email.trim());
+      armResend();
+      setBusy(false);
     }
-    setBusy(false);
   };
 
-  const Row = ({ ph, k, t = "text" }) => (
-    <input type={t} placeholder={ph} value={f[k]} onChange={set(k)}
-      onKeyDown={(e) => e.key === "Enter" && submit()}
-      style={inpSt()} />
-  );
+  /**
+   * Start a real password reset. Supabase sends the email and enforces its own
+   * rate limit; the link returns to this app, where the PASSWORD_RECOVERY
+   * session is turned into the set-a-new-password screen (see `SetPassword`).
+   * The copy never says "reset functionality will be configured" — it either
+   * sends the mail or shows the service's own error.
+   */
+  const sendReset = async () => {
+    if (busy) return;
+    if (!supabaseConfigured) { setErr(NO_ACCOUNTS); setInfo(""); return; }
+    const email = f.email.trim();
+    if (!email) { setErr("Enter your email address first, then choose Forgot password?"); return; }
+    setBusy(true); setErr(""); setInfo("");
+    try {
+      const { error } = await supabase.auth.resetPasswordForEmail(email, {
+        redirectTo: window.location.origin + window.location.pathname,
+      });
+      // Deliberately the same message whether or not the address is registered:
+      // telling an anonymous visitor which emails have accounts is an account
+      // enumeration leak, and Supabase's own API does not distinguish either.
+      if (error) setErr(error.message);
+      else setInfo(`If an account exists for ${email}, a reset link is on its way.`);
+    } catch (e) {
+      setErr(e?.message || String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  /**
+   * Resend the confirmation email. The countdown paces this screen only —
+   * Supabase enforces its own, longer limit and answers with a real error when
+   * it is reached, which is shown to the person unchanged. Nothing is retried
+   * automatically, so this can never turn into a mail-bomb.
+   */
+  const resend = async () => {
+    if (busy || waiting || !sentTo) return;
+    if (!supabaseConfigured) { setErr(NO_ACCOUNTS); return; }
+    setBusy(true); setErr(""); setInfo("");
+    try {
+      const { error } = await supabase.auth.resend({ type: "signup", email: sentTo });
+      if (error) setErr(error.message);
+      else setInfo(`Confirmation email sent again to ${sentTo}.`);
+    } catch (e) {
+      setErr(e?.message || String(e));
+    } finally {
+      // Re-arm either way: a refusal from the service is a reason to wait, not
+      // a reason to try again immediately.
+      setBusy(false);
+      armResend();
+    }
+  };
 
   return (
     <div style={{
-      position: "relative", minHeight: "100vh", background: K.bg, display: "flex",
+      position: "relative", minHeight: "100vh",
+      background: "radial-gradient(at 0% 0%, rgba(170, 59, 255, 0.15) 0px, transparent 50%), radial-gradient(at 100% 100%, rgba(64, 150, 255, 0.15) 0px, transparent 50%)",
+      backgroundColor: K.bg,
+      display: "flex",
       alignItems: "center", justifyContent: "center", padding: 24,
       fontFamily: FONT,
     }}>
       {G(dark)}
-      <div style={{ width: "100%", maxWidth: 340 }}>
-        {/* Logo */}
-        <div style={{ textAlign: "center", marginBottom: 36 }}>
-          <div style={{
-            width: 52, height: 52, borderRadius: 16,
-            background: K.acc,
-            display: "flex", alignItems: "center", justifyContent: "center",
-            margin: "0 auto 14px",
-          }}><Zap size={26} color="#fff" fill="#fff" /></div>
-          <div style={{ fontSize: 22, fontWeight: 700, color: K.txt, letterSpacing: -0.3 }}>Focusly</div>
-          <div style={{ fontSize: 12, color: K.sub, marginTop: 4 }}>
-            Minimal productivity · Maximum focus
+      <div style={{ position: "absolute", top: 18, right: 18 }}>
+        <ThemeSwitch dark={dark} onToggle={onTheme} />
+      </div>
+
+      {/* Frosted card. The translucency is theme-aware (a white sheet in dark
+          mode is a light-mode leak), and `.mtrl` turns it solid when the OS asks
+          for less transparency. */}
+      <div className="mtrl" style={{
+        width: "100%", maxWidth: 400, borderRadius: 22,
+        padding: "28px 26px", boxShadow: K.sh2,
+        background: dark ? "rgba(28, 28, 30, 0.72)" : "rgba(255, 255, 255, 0.72)",
+        backdropFilter: "saturate(180%) blur(20px)",
+        WebkitBackdropFilter: "saturate(180%) blur(20px)",
+        border: `1px solid ${dark ? "rgba(255,255,255,0.10)" : "rgba(255,255,255,0.5)"}`,
+      }}>
+        {/* Brand */}
+        <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 20 }}>
+          <div style={{ width: 38, height: 38, borderRadius: 12, background: K.acc, display: "flex", alignItems: "center", justifyContent: "center" }}>
+            <Compass size={20} color="#fff" />
+          </div>
+          <div>
+            <div style={{ fontSize: 17, fontWeight: 800, color: K.txt, letterSpacing: -0.3 }}>NORTH</div>
+            <div style={{ fontSize: 11, color: K.sub }}>Focus · Plan · Win your day</div>
           </div>
         </div>
 
-        {/* Mode toggle */}
-        <div role="tablist" aria-label="Choose sign in or register"
+        {/* Log in / Sign up */}
+        <div role="tablist" aria-label="Log in or create an account"
           style={{ display: "flex", background: K.surf, borderRadius: 10, padding: 3, marginBottom: 18, border: `1px solid ${K.border}` }}>
-          {["login", "register"].map((m) => (
-            <button key={m} type="button" role="tab" aria-selected={mode === m} className="b"
-              onClick={() => { setMode(m); setErr(""); }}
+          {[["login", "Log in"], ["register", "Sign up"]].map(([id, lbl]) => (
+            <button key={id} type="button" role="tab" aria-selected={mode === id} className="b"
+              onClick={() => switchMode(id)}
               style={{
-                flex: 1, textAlign: "center", padding: 7, borderRadius: 8,
-                background: mode === m ? K.accDim : "transparent",
-                color: mode === m ? K.acc : K.sub, fontSize: 13, fontWeight: 600,
-                textTransform: "capitalize", transition: "all .2s",
-              }}>{m}</button>
+                flex: 1, textAlign: "center", padding: 8, borderRadius: 8,
+                background: mode === id ? K.card : "transparent",
+                color: mode === id ? K.txt : K.sub, fontSize: 13, fontWeight: 600,
+                boxShadow: mode === id ? K.sh1 : "none", transition: "all .2s",
+              }}>{lbl}</button>
           ))}
         </div>
 
-        <div style={{ display: "flex", flexDirection: "column", gap: 9 }}>
-          {mode === "register" && <Row ph="Display name" k="name" />}
-          <Row ph="Username" k="user" />
-          <Row ph="Password" k="pass" t="password" />
-        </div>
+        {mode === "login" ? (
+          <>
+            <h1 style={{ margin: "0 0 4px", fontSize: 22, fontWeight: 700, color: K.txt, letterSpacing: -0.4 }}>Welcome back</h1>
+            <p style={{ margin: "0 0 16px", fontSize: 12, color: K.sub }}>Log in with your email and password.</p>
+            <div style={{ display: "flex", flexDirection: "column", gap: 9 }}>
+              <AuthField ph="Email" t="email" autoComplete="email"
+                value={f.email} onChange={(v) => setF((x) => ({ ...x, email: v }))}
+                onEnter={submit} />
+              <AuthField ph="Password" t="password" autoComplete="current-password"
+                value={f.pass} onChange={(v) => setF((x) => ({ ...x, pass: v }))}
+                onEnter={submit} reveal={passVisible} onToggleReveal={togglePassVisible} />
+            </div>
+            {/* Only a real control lives here. The previous "Remember me" box
+                was never read by anything, so it was removed rather than left
+                looking like it did something; the Supabase session is already
+                persisted for this device and the Sign out button ends it. */}
+            <div style={{ display: "flex", justifyContent: "flex-end", marginTop: 10, fontSize: 12 }}>
+              <button type="button" className="b" onClick={sendReset} disabled={busy}
+                style={{ color: K.acc, opacity: busy ? 0.6 : 1 }}>Forgot password?</button>
+            </div>
+          </>
+        ) : (
+          <>
+            <h1 style={{ margin: "0 0 4px", fontSize: 22, fontWeight: 700, color: K.txt, letterSpacing: -0.4 }}>Create your account</h1>
+            <p style={{ margin: "0 0 16px", fontSize: 12, color: K.sub }}>Use your email and a password — that's all NORTH needs.</p>
 
-        {err && <div role="alert" style={{ color: K.err, fontSize: 12, marginTop: 8, textAlign: "center" }}>{err}</div>}
+            <div style={{ display: "flex", flexDirection: "column", gap: 9 }}>
+              <AuthField ph="Full name" autoComplete="name"
+                value={f.name} onChange={(v) => setF((x) => ({ ...x, name: v }))}
+                onEnter={submit} />
+              <AuthField ph="Email" t="email" autoComplete="email"
+                value={f.email} onChange={(v) => setF((x) => ({ ...x, email: v }))}
+                onEnter={submit} />
+              <AuthField ph="Password" t="password" autoComplete="new-password"
+                value={f.pass} onChange={(v) => setF((x) => ({ ...x, pass: v }))}
+                onEnter={submit} reveal={passVisible} onToggleReveal={togglePassVisible} />
+            </div>
+          </>
+        )}
+
+        {sentTo && (
+          <div style={{ marginTop: 12, borderRadius: 10, background: K.surf, border: `1px solid ${K.border}`, padding: "10px 11px" }}>
+            <div style={{ fontSize: 12, fontWeight: 600, color: K.txt }}>Confirm your email</div>
+            <div style={{ fontSize: 11, color: K.sub, marginTop: 3, lineHeight: 1.55 }}>
+              A confirmation link is on its way to <strong style={{ color: K.txt }}>{sentTo}</strong>.
+              Open it, then log in.
+            </div>
+            <button type="button" className="b" onClick={resend}
+              disabled={busy || waiting}
+              aria-live="polite" aria-disabled={busy || waiting}
+              style={{
+                marginTop: 8, padding: "7px 11px", borderRadius: 8, fontSize: 11.5, fontWeight: 600,
+                background: busy || waiting ? K.surf : K.acc,
+                border: `1px solid ${busy || waiting ? K.border : K.acc}`,
+                color: busy || waiting ? K.muted : "#fff",
+              }}>
+              {waiting ? `Resend available in ${cooldown}s` : "Resend confirmation email"}
+            </button>
+            <p style={{ fontSize: 10, color: K.muted, margin: "7px 0 0", lineHeight: 1.5 }}>
+              This {RESEND_WAIT}-second timer only paces this screen. Supabase's own email
+              limit is longer, and if it is reached the service's message is shown above
+              rather than hidden.
+            </p>
+          </div>
+        )}
+        {info && <div role="status" style={{ fontSize: 11.5, color: K.acc, background: K.accDim, borderRadius: 8, padding: "8px 10px", marginTop: 10, lineHeight: 1.5 }}>{info}</div>}
+        {err && <div role="alert" style={{ color: K.err, fontSize: 12, marginTop: 10 }}>{err}</div>}
 
         <button type="button" className="b" onClick={submit} disabled={busy}
           style={{
             marginTop: 16, padding: 13, borderRadius: 10, width: "100%",
-            background: K.acc,
-            color: "#fff", fontWeight: 600, fontSize: 14,
+            background: K.acc, color: "#fff", fontWeight: 600, fontSize: 14,
             opacity: busy ? 0.7 : 1, transition: "opacity .2s",
           }}>
-          {busy ? "···" : mode === "login" ? "Sign in" : "Create account"}
+          {busy ? "···" : mode === "login" ? "Log in" : "Create account"}
+        </button>
+
+        {/* Tell the truth about where the data goes: with a configured project
+            every write is mirrored to the account and pulled back on the next
+            device, so the old "stays on this device" line is no longer true. */}
+        <p style={{ margin: "14px 0 0", textAlign: "center", fontSize: 10.5, color: K.muted, lineHeight: 1.5 }}>
+          {supabaseConfigured
+            ? "Your tasks, boards and focus history sync to your account — sign in on any NORTH client and they're there."
+            : "Accounts aren't configured on this deployment, so your data stays on this device."}
+        </p>
+      </div>
+    </div>
+  );
+}
+
+// ══════════════════════════════════════════════════════════════════════════
+// SET A NEW PASSWORD (the second half of a password reset)
+// ══════════════════════════════════════════════════════════════════════════
+// The reset email links back to this app. Supabase parses the recovery token
+// out of the URL and signs the person in with a PASSWORD_RECOVERY session, which
+// App turns into this screen. Without it the reset link would drop the user into
+// the normal app with no way to actually choose a password.
+const MIN_PASSWORD = 8;
+
+function SetPassword({ onDone, dark, onTheme }) {
+  const [pass, setPass] = useState("");
+  const [confirm, setConfirm] = useState("");
+  const [reveal, setReveal] = useState(false);
+  const [err, setErr] = useState("");
+  const [busy, setBusy] = useState(false);
+
+  const submit = async () => {
+    if (busy) return;
+    if (pass.length < MIN_PASSWORD) { setErr(`Use at least ${MIN_PASSWORD} characters.`); return; }
+    if (pass !== confirm) { setErr("Both passwords must match."); return; }
+    if (!supabaseConfigured) { setErr(NO_ACCOUNTS); return; }
+    setBusy(true); setErr("");
+    try {
+      const { error } = await supabase.auth.updateUser({ password: pass });
+      if (error) setErr(error.message);
+      else onDone();
+    } catch (e) {
+      setErr(e?.message || String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div style={{
+      position: "relative", minHeight: "100vh", backgroundColor: K.bg,
+      display: "flex", alignItems: "center", justifyContent: "center", padding: 24,
+      fontFamily: FONT,
+    }}>
+      {G(dark)}
+      <div className="mtrl" style={{
+        width: "100%", maxWidth: 400, borderRadius: 22, padding: "28px 26px", boxShadow: K.sh2,
+        background: dark ? "rgba(28, 28, 30, 0.72)" : "rgba(255, 255, 255, 0.72)",
+        backdropFilter: "saturate(180%) blur(20px)",
+        WebkitBackdropFilter: "saturate(180%) blur(20px)",
+        border: `1px solid ${dark ? "rgba(255,255,255,0.10)" : "rgba(255,255,255,0.5)"}`,
+      }}>
+        <div style={{ position: "absolute", top: 18, right: 18 }}>
+          <ThemeSwitch dark={dark} onToggle={onTheme} />
+        </div>
+        <h1 style={{ margin: "0 0 4px", fontSize: 22, fontWeight: 700, color: K.txt, letterSpacing: -0.4 }}>
+          Choose a new password
+        </h1>
+        <p style={{ margin: "0 0 16px", fontSize: 12, color: K.sub }}>
+          You're verified — set the password you'll use from now on.
+        </p>
+        <div style={{ display: "flex", flexDirection: "column", gap: 9 }}>
+          <AuthField ph={`New password (${MIN_PASSWORD}+ characters)`} t="password" autoComplete="new-password"
+            value={pass} onChange={setPass} onEnter={submit}
+            reveal={reveal} onToggleReveal={() => setReveal((v) => !v)} />
+          <AuthField ph="Repeat new password" t="password" autoComplete="new-password"
+            value={confirm} onChange={setConfirm} onEnter={submit}
+            reveal={reveal} onToggleReveal={() => setReveal((v) => !v)} />
+        </div>
+        {err && <div role="alert" style={{ color: K.err, fontSize: 12, marginTop: 10 }}>{err}</div>}
+        <button type="button" className="b" onClick={submit} disabled={busy}
+          style={{
+            marginTop: 16, padding: 13, borderRadius: 10, width: "100%",
+            background: K.acc, color: "#fff", fontWeight: 600, fontSize: 14,
+            opacity: busy ? 0.7 : 1,
+          }}>
+          {busy ? "···" : "Save password"}
         </button>
       </div>
     </div>
@@ -275,7 +833,7 @@ function Home({ user, go }) {
   const pending = (user.tasks || []).filter((t) => !t.completed && t.due === today()).slice(0, 4);
 
   return (
-    <div style={{ padding: "20px 16px" }}>
+    <div style={{ padding: "24px 20px 8px", maxWidth: 900, margin: "0 auto", width: "100%", boxSizing: "border-box" }}>
       {/* Greeting */}
       <div style={{ marginBottom: 24 }}>
         <div style={{ fontSize: 13, color: K.sub }}>{greet},</div>
@@ -418,19 +976,19 @@ function ActivityMap({ user }) {
         <div style={{ fontSize: 11, color: K.sub }}>{mins ? `${fmtH(sum4)} focused · last 4 weeks` : ""}</div>
       </div>
 
-      <div style={{ ...card(), padding: "14px 12px 10px" }}>
+      <div style={{ ...card(), padding: "16px 14px 12px", width: "fit-content" }}>
         {/* Month labels */}
-        <div style={{ display: "flex", gap: 3, paddingLeft: 13, marginBottom: 4 }}>
+        <div style={{ display: "flex", gap: 3, paddingLeft: 12, marginBottom: 4 }}>
           {cols.map((_, w) => (
-            <div key={w} style={{ flex: 1, fontSize: 8, color: K.muted, height: 10, overflow: "hidden", whiteSpace: "nowrap", textAlign: "center" }}>
+            <div key={w} style={{ width: 13, flexShrink: 0, fontSize: 7.5, color: K.muted, lineHeight: 1, whiteSpace: "nowrap", textAlign: "left" }}>
               {monthAt(w) ? MNS[cols[w][0].d.getMonth()] : ""}
             </div>
           ))}
         </div>
-        {/* Week rows */}
+        {/* Week rows (13px cells — GitHub-style, right-sized on every screen) */}
         {cols[0].map((_, r) => (
           <div key={r} style={{ display: "flex", gap: 3, alignItems: "center", marginBottom: 3 }}>
-            <div style={{ width: 10, fontSize: 8, color: K.muted, textAlign: "left" }}>{HM_DOW[r]}</div>
+            <div style={{ width: 9, fontSize: 7.5, color: K.muted, textAlign: "left", lineHeight: 1 }}>{HM_DOW[r]}</div>
             {cols.map((_, w) => {
               const { ymd } = cols[w][r];
               const m   = mins?.get(ymd) || 0;
@@ -442,7 +1000,7 @@ function ActivityMap({ user }) {
                   aria-label={fut ? undefined : m ? `${ymd} · ${m} min focused` : `${ymd} · no focus`}
                   title={fut ? undefined : m ? `${ymd} — ${m} min focused` : `${ymd} — no focus`}
                   style={{
-                    flex: 1, aspectRatio: "1", borderRadius: 3.5,
+                    width: 13, height: 13, borderRadius: 3.5, padding: 0, flexShrink: 0,
                     background: fut ? "transparent" : lvl === 0 ? K.border : K.acc + MAP_AL[lvl - 1],
                     boxShadow: ymd === td && !fut ? `inset 0 0 0 1.5px ${K.acc}` : "none",
                     cursor: fut ? "default" : "pointer",
@@ -452,11 +1010,11 @@ function ActivityMap({ user }) {
           </div>
         ))}
         {/* Legend */}
-        <div style={{ display: "flex", alignItems: "center", justifyContent: "flex-end", gap: 3, marginTop: 4, paddingRight: 2 }}>
+        <div style={{ display: "flex", alignItems: "center", justifyContent: "flex-end", gap: 3, marginTop: 5, paddingRight: 1 }}>
           <span style={{ fontSize: 8, color: K.muted, marginRight: 3 }}>Less</span>
           {[0, 1, 2, 3, 4, 5].map((l) => (
             <span key={l} aria-hidden="true" style={{
-              width: 9, height: 9, borderRadius: 2,
+              width: 10, height: 10, borderRadius: 2,
               background: l === 0 ? K.border : K.acc + MAP_AL[l - 1],
             }} />
           ))}
@@ -508,6 +1066,18 @@ function Focus({ user }) {
   const run    = useRef(null);  // latest `finish`, called by the ticking interval
   const audioR = useRef(null);  // shared WebAudio context for the chime
   const titleR = useRef(typeof document !== "undefined" ? document.title : "");
+
+  // Publish the running session into the shared blocking state that the
+  // extension and desktop clients read, so "block during focus" is one fact
+  // rather than four. Fire-and-forget: a storage failure must never stall the
+  // timer itself.
+  const publishFocus = async (focus) => {
+    try {
+      const u = (await S.get(PROFILE_KEY(user.un))) || {};
+      const b = normalizeState(u.blocking || defaultBlocking());
+      await S.set(PROFILE_KEY(user.un), { ...u, blocking: { ...b, focus } });
+    } catch { /* device storage unavailable — the timer still runs */ }
+  };
 
   // Restore today's totals from persisted raw records, not from volatile UI
   // state: minutes come from the daily `fo` total (back-compat), session and
@@ -567,7 +1137,7 @@ function Focus({ user }) {
     if (!pm.notify || typeof Notification === "undefined") return;
     try {
       if (Notification.permission === "granted")
-        new Notification("Focusly", { body: p === 0 ? "Focus session complete — time for a break." : "Break's over — ready to focus?" });
+        new Notification("NORTH", { body: p === 0 ? "Focus session complete — time for a break." : "Break's over — ready to focus?" });
     } catch {}
   };
   const savePm = (next) => {
@@ -593,6 +1163,7 @@ function Focus({ user }) {
 
   const finish = async (skip = false) => {
     clearInterval(ivR.current);
+    publishFocus(null); // the blocking window closes with the session
     const p = phR.current;
     if (!skip) endNotify(p); // natural completion → chime / notification
     if (p === 0) {
@@ -658,8 +1229,16 @@ function Focus({ user }) {
     return () => { clearInterval(ivR.current); try { document.title = titleR.current; } catch {} };
   }, [on]);
 
-  const goPhase = (i) => { setOn(false); setPhase(i); phR.current = i; setT(DURS[i]); tR.current = DURS[i]; };
-  const reset   = () => { setOn(false); setT(DURS[phase]); tR.current = DURS[phase]; };
+  const goPhase = (i) => { setOn(false); publishFocus(null); setPhase(i); phR.current = i; setT(DURS[i]); tR.current = DURS[i]; };
+  const reset   = () => { setOn(false); publishFocus(null); setT(DURS[phase]); tR.current = DURS[phase]; };
+  // Start/pause publishes or clears the shared focus window (a resume gets a
+  // fresh end time, which is what the blocking engine needs).
+  const toggleRun = () => {
+    primeAudio();
+    const next = !on;
+    publishFocus(next ? startFocusSession(Math.max(1, Math.ceil(tR.current / 60)), Date.now()) : null);
+    setOn(next);
+  };
 
   const mm = pad2(Math.floor(t / 60));
   const ss = pad2(t % 60);
@@ -668,7 +1247,7 @@ function Focus({ user }) {
   const col  = F_COLS()[phase];
 
   return (
-    <div style={{ padding: "20px 16px" }}>
+    <div style={{ padding: "24px 20px 8px", maxWidth: 900, margin: "0 auto", width: "100%", boxSizing: "border-box" }}>
       <h2 style={{ color: K.txt, fontSize: 18, fontWeight: 600, margin: "0 0 20px" }}>Focus timer</h2>
 
       {/* Phase tabs */}
@@ -719,7 +1298,7 @@ function Focus({ user }) {
       <div style={{ display: "flex", gap: 12, justifyContent: "center", marginBottom: 28 }}>
         {[
           { I: RotateCcw, w: 48, a11y: "Reset timer", onClick: reset },
-          { I: on ? Pause : Play, w: 80, a11y: on ? "Pause" : "Start", primary: true, onClick: () => { primeAudio(); setOn((x) => !x); } },
+          { I: on ? Pause : Play, w: 80, a11y: on ? "Pause" : "Start", primary: true, onClick: toggleRun },
           { I: SkipForward, w: 48, a11y: "Skip session", onClick: () => finish(true) },
         ].map((b) => (
           <button key={b.a11y} type="button" className="b" onClick={b.onClick} aria-label={b.a11y}
@@ -848,6 +1427,9 @@ function Tasks({ user }) {
   const [filter,  setFilter]  = useState("today");
   const [showAdd, setShowAdd] = useState(false);
   const [nt,      setNt]      = useState({ title: "", due: today(), pri: "medium", cat: "Personal" });
+  // Right-click actions for a task (active only when the device preference asks
+  // for NORTH's menu — otherwise openMenu is a no-op and the browser menu shows).
+  const { menu, openMenu, closeMenu } = useContextMenu();
 
   const persist = async (updated) => {
     setTasks(updated);
@@ -874,7 +1456,7 @@ function Tasks({ user }) {
   });
 
   return (
-    <div style={{ padding: "20px 16px" }}>
+    <div style={{ padding: "24px 20px 8px", maxWidth: 900, margin: "0 auto", width: "100%", boxSizing: "border-box" }}>
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 20 }}>
         <div>
           <h2 style={{ color: K.txt, fontSize: 18, fontWeight: 600, margin: 0 }}>Tasks</h2>
@@ -935,47 +1517,71 @@ function Tasks({ user }) {
         ))}
       </div>
 
-      {/* List */}
-      <div style={{ display: "flex", flexDirection: "column", gap: 7 }}>
-        {filt.length === 0 && (
-          <div style={{ textAlign: "center", color: K.muted, fontSize: 13, padding: 40 }}>
-            {filter === "today" ? "✓ All done today!" : "No tasks here"}
-          </div>
-        )}
-        {filt.map((task) => (
-          <div key={task.id} style={{
-            ...card2(), display: "flex", alignItems: "center", gap: 10,
-            opacity: task.completed ? 0.5 : 1, transition: "opacity .2s",
-          }}>
-            <div style={{ width: 3, height: 28, borderRadius: 2, flexShrink: 0, background: PCOL()[task.pri] }} />
-            <button type="button" className="b"
-              onClick={() => toggle(task.id)}
-              aria-label={task.completed ? `Mark "${task.title}" as not done` : `Mark "${task.title}" as done`}
-              aria-pressed={task.completed}
-              style={{
-                width: 22, height: 22, borderRadius: 6, flexShrink: 0,
-                border: `2px solid ${task.completed ? K.ok : K.border}`,
-                background: task.completed ? K.ok + "22" : "transparent",
-                color: task.completed ? K.ok : "transparent",
-                display: "flex", alignItems: "center", justifyContent: "center",
-                transition: "all .2s",
-              }}><Check size={13} strokeWidth={3.5} color={task.completed ? K.ok : "transparent"} /></button>
-            <div style={{ flex: 1, minWidth: 0 }}>
-              <div style={{
-                fontSize: 13, color: task.completed ? K.muted : K.txt,
-                textDecoration: task.completed ? "line-through" : "none",
-                overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
-              }}>{task.title}</div>
-              <div style={{ fontSize: 10, color: K.muted, marginTop: 2 }}>
-                {task.cat}{task.due ? ` · ${task.due}` : ""}
+      {/* List — one grouped card, hairline rows (minimal & Apple-like) */}
+      {filt.length === 0 ? (
+        <div style={{ ...card(), textAlign: "center", color: K.muted, fontSize: 13, padding: "36px 16px" }}>
+          {filter === "today" ? "Nothing due today — enjoy the quiet" : filter === "done" ? "No completed tasks yet" : "No tasks here"}
+        </div>
+      ) : (
+        <div style={{ ...card(), padding: "4px 16px" }}>
+          {filt.map((task, i) => {
+            const due = task.due;
+            let dueLbl = "";
+            if (due) {
+              if (due === today()) dueLbl = "Today";
+              else if (due === new Date(Date.now() + 86400000).toISOString().slice(0, 10)) dueLbl = "Tomorrow";
+              else if (due > today()) { const p = due.split("-"); dueLbl = `${MNS[Number(p[1]) - 1]} ${Number(p[2])}`; }
+              else dueLbl = due;
+            }
+            return (
+              <div key={task.id}
+                onContextMenu={(e) => openMenu(e, [
+                  { lbl: task.completed ? "Mark as not done" : "Mark as done", run: () => toggle(task.id) },
+                  { lbl: "Delete task", danger: true, run: () => del(task.id) },
+                ])}
+                style={{
+                display: "flex", alignItems: "center", gap: 11, padding: "11px 0",
+                borderBottom: i < filt.length - 1 ? `1px solid ${K.border}` : "none",
+                opacity: task.completed ? 0.55 : 1, transition: "opacity .2s",
+              }}>
+                <button type="button" className="b"
+                  onClick={() => toggle(task.id)}
+                  aria-label={task.completed ? `Mark "${task.title}" as not done` : `Mark "${task.title}" as done`}
+                  aria-pressed={task.completed}
+                  style={{
+                    width: 24, height: 24, borderRadius: "50%", flexShrink: 0,
+                    border: `2px solid ${task.completed ? K.ok : K.border}`,
+                    background: task.completed ? K.ok : "transparent",
+                    display: "flex", alignItems: "center", justifyContent: "center",
+                    transition: "all .2s",
+                  }}><Check size={13} strokeWidth={3.5} color={task.completed ? "#fff" : "transparent"} /></button>
+                <div style={{ flex: 1, minWidth: 0, display: "flex", alignItems: "center", gap: 8 }}>
+                  <span title={`Priority: ${task.pri}`} aria-hidden="true" style={{ width: 7, height: 7, borderRadius: "50%", background: PCOL()[task.pri], flexShrink: 0 }} />
+                  <span style={{
+                    fontSize: 14, color: task.completed ? K.muted : K.txt, fontWeight: 500,
+                    textDecoration: task.completed ? "line-through" : "none",
+                    overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
+                  }}>{task.title}</span>
+                </div>
+                {dueLbl && (
+                  <span style={{
+                    fontSize: 11, flexShrink: 0, fontWeight: 600,
+                    color: due === today() && !task.completed ? K.err : K.muted,
+                    background: due === today() && !task.completed ? K.err + "14" : "transparent",
+                    padding: "2px 7px", borderRadius: 999,
+                  }}>{dueLbl}</span>
+                )}
+                <span style={{ fontSize: 10.5, color: K.muted, flexShrink: 0 }}>{task.cat}</span>
+                <button type="button" className="b" onClick={() => del(task.id)}
+                  aria-label={`Delete task "${task.title}"`}
+                  style={{ color: K.muted, display: "flex", alignItems: "center", justifyContent: "center", padding: 4 }}><X size={15} color={K.muted} /></button>
               </div>
-            </div>
-            <button type="button" className="b" onClick={() => del(task.id)}
-              aria-label={`Delete task "${task.title}"`}
-              style={{ color: K.muted, display: "flex", alignItems: "center", justifyContent: "center", padding: 4 }}><X size={15} color={K.muted} /></button>
-          </div>
-        ))}
-      </div>
+            );
+          })}
+        </div>
+      )}
+
+      {menu && <ContextMenu menu={menu} onClose={closeMenu} />}
     </div>
   );
 }
@@ -990,7 +1596,7 @@ const DNS = ["Su","Mo","Tu","We","Th","Fr","Sa"];
 function Cal({ user }) {
   const [tasks,   setTasks]   = useState(user.tasks || []);
   const [cur,     setCur]     = useState(new Date());
-  const [sel,     setSel]     = useState(null);
+  const [sel,     setSel]     = useState(() => new Date().getDate());
   const [showAdd, setShowAdd] = useState(false);
   const [newT,    setNewT]    = useState("");
 
@@ -1018,59 +1624,80 @@ function Cal({ user }) {
   const st = sel ? dt(sel) : [];
 
   return (
-    <div style={{ padding: "20px 16px" }}>
-      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 20 }}>
-        <h2 style={{ color: K.txt, fontSize: 18, fontWeight: 600, margin: 0 }}>Calendar</h2>
-        <div style={{ display: "flex", gap: 10, alignItems: "center" }}>
-          <button type="button" className="b" onClick={() => setCur(new Date(Y, M - 1, 1))}
-            aria-label="Previous month"
-            style={{ color: K.sub, width: 32, height: 32, borderRadius: 8, display: "flex", alignItems: "center", justifyContent: "center" }}><ChevronLeft size={20} color={K.sub} /></button>
-          <div style={{ fontSize: 13, fontWeight: 600, color: K.txt, minWidth: 110, textAlign: "center" }}>{MNS[M]} {Y}</div>
-          <button type="button" className="b" onClick={() => setCur(new Date(Y, M + 1, 1))}
-            aria-label="Next month"
-            style={{ color: K.sub, width: 32, height: 32, borderRadius: 8, display: "flex", alignItems: "center", justifyContent: "center" }}><ChevronRight size={20} color={K.sub} /></button>
+    <div style={{ padding: "24px 20px 8px", maxWidth: 900, margin: "0 auto", width: "100%", boxSizing: "border-box" }}>
+      {/* Month header — Apple style: big title + chevrons + Today */}
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10, marginBottom: 14 }}>
+        <div style={{ fontSize: 28, fontWeight: 800, color: K.txt, letterSpacing: -0.5 }}>
+          {MNL[M]} <span style={{ color: K.sub, fontWeight: 600 }}>{Y}</span>
+        </div>
+        <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+          <button type="button" className="b" onClick={() => { setCur(new Date(Y, M, 1)); setSel(now.getDate()); }}
+            style={{
+              padding: "5px 13px", borderRadius: 999, background: K.surf, color: K.acc,
+              border: `1px solid ${K.border}`, fontSize: 12, fontWeight: 600,
+            }}>Today</button>
+          <div style={{ display: "flex", background: K.surf, borderRadius: 999, padding: 2, border: `1px solid ${K.border}` }}>
+            <button type="button" className="b" onClick={() => setCur(new Date(Y, M - 1, 1))}
+              aria-label="Previous month"
+              style={{ width: 28, height: 28, borderRadius: "50%", display: "flex", alignItems: "center", justifyContent: "center" }}>
+              <ChevronLeft size={17} color={K.sub} />
+            </button>
+            <button type="button" className="b" onClick={() => setCur(new Date(Y, M + 1, 1))}
+              aria-label="Next month"
+              style={{ width: 28, height: 28, borderRadius: "50%", display: "flex", alignItems: "center", justifyContent: "center" }}>
+              <ChevronRight size={17} color={K.sub} />
+            </button>
+          </div>
         </div>
       </div>
 
-      <div style={{ display: "grid", gridTemplateColumns: "repeat(7,1fr)", marginBottom: 5 }}>
-        {DNS.map((d) => <div key={d} style={{ textAlign: "center", fontSize: 9, color: K.muted, padding: "3px 0", fontWeight: 700 }}>{d}</div>)}
-      </div>
+      <div style={{ ...card(), padding: "14px 14px 10px" }}>
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(7,1fr)", marginBottom: 4 }}>
+          {DNS.map((d) => <div key={d} style={{ textAlign: "center", fontSize: 10, color: K.muted, padding: "3px 0", fontWeight: 700 }}>{d}</div>)}
+        </div>
 
-      <div style={{ display: "grid", gridTemplateColumns: "repeat(7,1fr)", gap: 2, marginBottom: 20 }}>
-        {Array(fd).fill(null).map((_, i) => <div key={`e${i}`} />)}
-        {Array(dm).fill(null).map((_, i) => {
-          const d   = i + 1;
-          const dts = dt(d);
-          const isT = now.getDate() === d && now.getMonth() === M && now.getFullYear() === Y;
-          const isS = sel === d;
-          return (
-            <button key={d} type="button" className="b" onClick={() => setSel(isS ? null : d)}
-              aria-pressed={isS}
-              aria-label={`${MNL[M]} ${d}${dts.length ? ", " + dts.length + (dts.length === 1 ? " task" : " tasks") : ""}`}
-              style={{
-                aspectRatio: "1", borderRadius: 8, display: "flex", flexDirection: "column",
-                alignItems: "center", justifyContent: "center",
-                background: isS ? K.acc : isT ? K.accDim : "transparent",
-                border: `1px solid ${isS ? K.acc : isT ? K.acc + "60" : "transparent"}`,
-                transition: "all .15s",
-              }}>
-              <span style={{ fontSize: 11, color: isS ? "#fff" : isT ? K.acc : K.txt, fontWeight: isT ? 700 : 400 }}>{d}</span>
-              {dts.length > 0 && (
-                <span style={{ display: "flex", gap: 1.5, marginTop: 2 }}>
-                  {dts.slice(0, 3).map((t, i) => (
-                    <span key={i} style={{ width: 3, height: 3, borderRadius: "50%", background: t.completed ? K.ok : t.pri === "high" ? K.err : K.acc }} />
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(7,1fr)", rowGap: 2, columnGap: 4, marginBottom: 6 }}>
+          {Array(fd).fill(null).map((_, i) => <div key={`e${i}`} />)}
+          {Array(dm).fill(null).map((_, i) => {
+            const d   = i + 1;
+            const dts = dt(d);
+            const isT = now.getDate() === d && now.getMonth() === M && now.getFullYear() === Y;
+            const isS = sel === d;
+            return (
+              <button key={d} type="button" className="b" onClick={() => setSel(isS ? null : d)}
+                aria-pressed={isS}
+                aria-label={`${MNL[M]} ${d}${dts.length ? ", " + dts.length + (dts.length === 1 ? " task" : " tasks") : ""}`}
+                style={{
+                  height: 56, borderRadius: 10, display: "flex", flexDirection: "column",
+                  alignItems: "center", justifyContent: "center", gap: 2,
+                  background: "transparent", transition: "all .15s",
+                }}>
+                <span style={{
+                  width: 32, height: 32, borderRadius: "50%",
+                  display: "flex", alignItems: "center", justifyContent: "center",
+                  background: isS ? K.acc : "transparent",
+                  boxShadow: isT && !isS ? `inset 0 0 0 1.5px ${K.acc}` : "none",
+                  fontSize: 14, fontWeight: isS || isT ? 700 : 500,
+                  color: isS ? "#fff" : isT ? K.acc : K.txt,
+                }}>{d}</span>
+                <span style={{ display: "flex", gap: 2, height: 3 }}>
+                  {dts.slice(0, 4).map((t, i) => (
+                    <span key={i} style={{ width: 3.5, height: 3.5, borderRadius: "50%", background: t.completed ? K.ok : t.pri === "high" ? K.err : K.acc }} />
                   ))}
                 </span>
-              )}
-            </button>
-          );
-        })}
+              </button>
+            );
+          })}
+        </div>
       </div>
 
       {sel && (
-        <div>
+        <div style={{ marginTop: 16 }}>
           <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10 }}>
-            <div style={{ fontSize: 13, fontWeight: 600, color: K.txt }}>{MNL[M]} {sel}</div>
+            <div style={{ fontSize: 17, fontWeight: 700, color: K.txt, letterSpacing: -0.3 }}>
+              {MNL[M]} {sel}
+              {st.length > 0 && <span style={{ color: K.sub, fontWeight: 500, marginLeft: 6, fontSize: 13 }}>{st.length} task{st.length === 1 ? "" : "s"}</span>}
+            </div>
             <button type="button" className="b" onClick={() => setShowAdd((v) => !v)}
               aria-expanded={showAdd}
               style={{ ...tag(showAdd, K.acc), padding: "5px 12px", display: "flex", alignItems: "center", gap: 3 }}>
@@ -1078,7 +1705,7 @@ function Cal({ user }) {
             </button>
           </div>
           {showAdd && (
-            <div style={{ display: "flex", gap: 7, marginBottom: 10 }}>
+            <div style={{ ...card(), display: "flex", gap: 7, marginBottom: 12, padding: "10px 12px" }}>
               <input autoFocus style={{ ...inpSt(), flex: 1, padding: "8px 12px" }} placeholder="Add task for this day…"
                 value={newT} onChange={(e) => setNewT(e.target.value)}
                 onKeyDown={(e) => e.key === "Enter" && addQ()} />
@@ -1086,15 +1713,20 @@ function Cal({ user }) {
                 style={{ padding: "9px 15px", borderRadius: 8, background: K.acc, display: "flex", alignItems: "center", justifyContent: "center" }}><Plus size={16} color="#fff" /></button>
             </div>
           )}
-          {st.length === 0 ? (
-            <div style={{ textAlign: "center", color: K.muted, fontSize: 13, padding: 14 }}>No tasks this day</div>
-          ) : st.map((t) => (
-            <div key={t.id} style={{ ...card2(), marginBottom: 7, display: "flex", alignItems: "center", gap: 10 }}>
-              <div style={{ width: 3, height: 22, borderRadius: 2, background: t.completed ? K.ok : t.pri === "high" ? K.err : K.acc }} />
-              <div style={{ flex: 1, fontSize: 13, color: t.completed ? K.muted : K.txt, textDecoration: t.completed ? "line-through" : "none" }}>{t.title}</div>
-              <div style={{ fontSize: 10, color: K.muted }}>{t.cat}</div>
-            </div>
-          ))}
+          <div style={{ ...card(), padding: "4px 14px" }}>
+            {st.length === 0 ? (
+              <div style={{ textAlign: "center", color: K.muted, fontSize: 13, padding: "16px 0" }}>Nothing planned for this day</div>
+            ) : st.map((t, i) => (
+              <div key={t.id} style={{
+                display: "flex", alignItems: "center", gap: 10, padding: "10px 0",
+                borderBottom: i < st.length - 1 ? `1px solid ${K.border}` : "none",
+              }}>
+                <div style={{ width: 3, height: 20, borderRadius: 2, flexShrink: 0, background: t.completed ? K.ok : t.pri === "high" ? K.err : K.acc }} />
+                <div style={{ flex: 1, fontSize: 13.5, color: t.completed ? K.muted : K.txt, textDecoration: t.completed ? "line-through" : "none", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{t.title}</div>
+                <div style={{ fontSize: 11, color: K.muted, flexShrink: 0 }}>{t.cat}</div>
+              </div>
+            ))}
+          </div>
         </div>
       )}
     </div>
@@ -1106,7 +1738,10 @@ function Cal({ user }) {
 // ══════════════════════════════════════════════════════════════════════════
 const ICS = ["📱","🌐","📺","🎮","📸","💬","🎵","📧","🛒","📰","🐦","📷"];
 
-function Apps({ user }) {
+// Usage numbers here stay deliberately manual, and the screen says so: a web
+// page cannot read another app's screen time. The rules that clients genuinely
+// enforce live in the Blocking screen, which renders this section beneath them.
+function AppUsage({ user }) {
   const [apps,    setApps]    = useState([]);
   const [showAdd, setShowAdd] = useState(false);
   const [na,      setNa]      = useState({ name: "", icon: "📱", limit: 60 });
@@ -1141,9 +1776,9 @@ function Apps({ user }) {
   const over  = apps.filter((a) => (a.used || 0) >= a.limit).length;
 
   return (
-    <div style={{ padding: "20px 16px" }}>
+    <div style={{ padding: "24px 20px 8px", maxWidth: 900, margin: "0 auto", width: "100%", boxSizing: "border-box" }}>
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 6 }}>
-        <h2 style={{ color: K.txt, fontSize: 18, fontWeight: 600, margin: 0 }}>App tracker</h2>
+        <h2 style={{ color: K.txt, fontSize: 18, fontWeight: 600, margin: 0 }}>Screen time</h2>
         <button type="button" className="b" onClick={() => setShowAdd((v) => !v)}
           aria-label={showAdd ? "Close add app" : "Track an app"}
           style={{
@@ -1155,7 +1790,7 @@ function Apps({ user }) {
           }}>{showAdd ? <X size={18} color={K.sub} /> : <Plus size={18} color="#fff" />}</button>
       </div>
       <div style={{ fontSize: 12, color: K.sub, marginBottom: 20 }}>
-        {total}m used today ·{" "}
+        {total}m used today, logged manually ·{" "}
         {over > 0
           ? <span style={{ color: K.err }}>{over} over limit</span>
           : <span style={{ color: K.ok }}>all within limits</span>}
@@ -1262,6 +1897,411 @@ function Apps({ user }) {
 }
 
 // ══════════════════════════════════════════════════════════════════════════
+// BLOCKING — websites, applications, schedules
+// ══════════════════════════════════════════════════════════════════════════
+// One screen, one data model (src/shared/blocking.js — the same file the
+// extension, desktop and mobile clients use). This page CONFIGURES rules and
+// reports honestly where each kind is enforced: the browser extension blocks
+// websites for real, the desktop app ends blocked applications. A web page can
+// do neither, so it never claims to.
+
+/** Small switch used by the rule/schedule rows (mirrors the timer's toggles). */
+const Toggle = ({ on, onToggle, label }) => (
+  <button type="button" className="b" role="switch" aria-checked={on} onClick={onToggle}
+    aria-label={`${on ? "Turn off" : "Turn on"} ${label}`}
+    style={{
+      width: 40, height: 24, borderRadius: 12, position: "relative", flexShrink: 0,
+      background: on ? K.ok : K.muted + "55", transition: "background .2s",
+    }}>
+    <span aria-hidden="true" style={{
+      position: "absolute", top: 2, left: on ? 18 : 2, width: 20, height: 20,
+      borderRadius: "50%", background: "#fff", boxShadow: "0 1px 3px rgba(0,0,0,.25)",
+      transition: "left .18s ease",
+    }} />
+  </button>
+);
+
+const ENFORCEMENT_ROWS = [
+  { kind: "websites", cap: "extension", client: "Browser extension" },
+  { kind: "applications", cap: "desktop", client: "Desktop app" },
+];
+
+function Blocking({ user }) {
+  const [blocking, setBlocking] = useState(() => normalizeState(user.blocking || defaultBlocking()));
+  const [, bumpClock] = useState(0); // the verdict depends on the wall clock
+  const [showSite, setShowSite] = useState(false);
+  const [site, setSite] = useState("");
+  const [showAppRule, setShowAppRule] = useState(false);
+  const [appName, setAppName] = useState("");
+  const [showSched, setShowSched] = useState(false);
+  const [draft, setDraft] = useState(() => newSchedule({ name: "Work hours" }));
+  const [err, setErr] = useState("");
+  // Right-click actions for a block rule (no-op unless the device preference
+  // asks for NORTH's menu).
+  const { menu, openMenu, closeMenu } = useContextMenu();
+
+  // A schedule can start, or a focus session end, while this screen is open —
+  // so refresh the status instead of showing a stale verdict.
+  useEffect(() => {
+    const id = setInterval(() => bumpClock((n) => n + 1), 20000);
+    return () => clearInterval(id);
+  }, []);
+
+  const now = Date.now();
+  const verdict = evaluateBlocking(blocking, now);
+  const status = describeBlocking(blocking, now);
+  const grouped = rulesByKind(blocking);
+  const tracked = user.apps || [];
+
+  const persist = async (next) => {
+    setBlocking(next);
+    const u = (await S.get(PROFILE_KEY(user.un))) || {};
+    await S.set(PROFILE_KEY(user.un), { ...u, blocking: next });
+  };
+  const patchRule = async (rule) => persist(upsertRule(blocking, rule));
+
+  const addWebsite = async () => {
+    const host = normalizeHost(site);
+    if (!host) { setErr("That doesn't look like a domain — try youtube.com"); return; }
+    if (blocking.rules.some((r) => r.kind === "website" && r.target === host)) {
+      setErr(`${host} is already on the list.`); return;
+    }
+    await persist(upsertRule(blocking, newRule({ kind: "website", target: host })));
+    setSite(""); setShowSite(false); setErr("");
+  };
+
+  const addAppRule = async () => {
+    const name = normalizeApp(appName);
+    if (!name) { setErr("Name the application — e.g. Steam"); return; }
+    if (blocking.rules.some((r) => r.kind === "app" && r.target.toLowerCase() === name.toLowerCase())) {
+      setErr(`${name} is already on the list.`); return;
+    }
+    await persist(upsertRule(blocking, newRule({ kind: "app", target: name })));
+    setAppName(""); setShowAppRule(false); setErr("");
+  };
+
+  const addSchedule = async () => {
+    if (!draft.days.length) { setErr("Pick at least one day for the schedule."); return; }
+    if (draft.start === draft.end) { setErr("A schedule needs a start and an end that differ."); return; }
+    await persist(upsertSchedule(blocking, draft));
+    setDraft(newSchedule({ name: "Work hours" })); setShowSched(false); setErr("");
+  };
+
+  /** The Always / During focus / Scheduled chips on every rule. */
+  const WhenPicker = ({ rule }) => (
+    <div style={{ display: "flex", gap: 4, flexWrap: "wrap", alignItems: "center", marginTop: 8 }}>
+      {["always", "focus", "scheduled"].map((w) => (
+        <button key={w} type="button" className="b" onClick={() => patchRule({ ...rule, when: w })}
+          aria-pressed={rule.when === w}
+          style={{ ...tag(rule.when === w, K.acc), padding: "3px 9px", fontSize: 10.5 }}>
+          {RULE_WHEN_LABEL[w]}
+        </button>
+      ))}
+      {rule.when === "scheduled" && (
+        blocking.schedules.length === 0 ? (
+          <span style={{ fontSize: 10.5, color: K.warn }}>Add a schedule below</span>
+        ) : (
+          <span style={{ display: "flex", gap: 4, flexWrap: "wrap" }}>
+            {blocking.schedules.map((sc) => {
+              const on = rule.scheduleIds.includes(sc.id);
+              return (
+                <button key={sc.id} type="button" className="b"
+                  onClick={() => patchRule({
+                    ...rule,
+                    scheduleIds: on ? rule.scheduleIds.filter((x) => x !== sc.id) : [...rule.scheduleIds, sc.id],
+                  })}
+                  aria-pressed={on}
+                  style={{ ...tag(on, K.ok), padding: "3px 9px", fontSize: 10.5 }}>{sc.name}</button>
+              );
+            })}
+          </span>
+        )
+      )}
+    </div>
+  );
+
+  const RuleRow = ({ rule }) => {
+    const why = verdict.reasons[rule.id];
+    const paused = why?.reason === "temp-unblock";
+    const blockedNow = Boolean(why) && !paused;
+    const usage = rule.kind === "app"
+      ? tracked.find((a) => String(a.name).toLowerCase() === rule.target.toLowerCase())
+      : null;
+    return (
+      <div style={{ ...card2(), marginBottom: 8 }}
+        onContextMenu={(e) => openMenu(e, [
+          ...(blockedNow && blocking.settings.allowTemporaryUnblock
+            ? [{
+                lbl: `Pause for ${blocking.settings.tempUnblockMinutes}m`,
+                run: () => persist(unblockUntil(blocking, rule.id, blocking.settings.tempUnblockMinutes)),
+              }]
+            : []),
+          {
+            lbl: rule.enabled ? "Turn rule off" : "Turn rule on",
+            run: () => persist(setRuleEnabled(blocking, rule.id, !rule.enabled)),
+          },
+          { lbl: "Remove rule", danger: true, run: () => persist(removeRule(blocking, rule.id)) },
+        ])}>
+        <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+          <span aria-hidden="true" style={{ fontSize: 15 }}>{rule.kind === "app" ? "🪟" : "🌐"}</span>
+          <div style={{ flex: 1, minWidth: 0 }}>
+            <div style={{ fontSize: 13.5, fontWeight: 500, color: K.txt, display: "flex", alignItems: "center", gap: 6, minWidth: 0 }}>
+              <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{rule.target}</span>
+              {blockedNow && <span style={{ fontSize: 9, fontWeight: 700, color: K.err, background: K.err + "20", padding: "1px 5px", borderRadius: 10, flexShrink: 0 }}>ACTIVE</span>}
+              {paused && <span style={{ fontSize: 9, fontWeight: 700, color: K.warn, background: K.warn + "20", padding: "1px 5px", borderRadius: 10, flexShrink: 0 }}>PAUSED</span>}
+            </div>
+            <div style={{ fontSize: 10.5, color: K.sub, marginTop: 2 }}>
+              {usage ? `${usage.used || 0}m used of ${usage.limit}m` : rule.kind === "app" ? "Application" : "Website"}
+              {paused ? ` · unpaused in ${Math.max(1, Math.ceil((why.until - now) / 60000))}m` : ""}
+            </div>
+          </div>
+          {blockedNow && blocking.settings.allowTemporaryUnblock && (
+            <button type="button" className="b"
+              onClick={() => persist(unblockUntil(blocking, rule.id, blocking.settings.tempUnblockMinutes))}
+              aria-label={`Pause blocking of ${rule.target} for ${blocking.settings.tempUnblockMinutes} minutes`}
+              style={{ ...tag(false, K.warn), padding: "3px 9px", fontSize: 10.5, flexShrink: 0 }}>
+              Pause {blocking.settings.tempUnblockMinutes}m
+            </button>
+          )}
+          <Toggle on={rule.enabled} label={rule.target}
+            onToggle={() => persist(setRuleEnabled(blocking, rule.id, !rule.enabled))} />
+          <button type="button" className="b" onClick={() => persist(removeRule(blocking, rule.id))}
+            aria-label={`Remove the rule for ${rule.target}`}
+            style={{ color: K.muted, display: "flex", alignItems: "center", justifyContent: "center", padding: 4, flexShrink: 0 }}>
+            <Trash2 size={15} color={K.muted} />
+          </button>
+        </div>
+        <WhenPicker rule={rule} />
+      </div>
+    );
+  };
+
+  const addButton = (open, setOpen, label) => (
+    <button type="button" className="b" onClick={() => { setOpen(!open); setErr(""); }}
+      aria-label={open ? "Close" : label} aria-expanded={open}
+      style={{
+        width: 30, height: 30, borderRadius: 8, flexShrink: 0,
+        background: open ? K.card : K.acc,
+        border: open ? `1px solid ${K.border}` : "none",
+        display: "flex", alignItems: "center", justifyContent: "center",
+      }}>
+      {open ? <X size={17} color={K.sub} /> : <Plus size={17} color="#fff" />}
+    </button>
+  );
+
+  return (
+    <div style={{ padding: "24px 20px 8px", maxWidth: 900, margin: "0 auto", width: "100%", boxSizing: "border-box" }}>
+      <h2 style={{ color: K.txt, fontSize: 18, fontWeight: 600, margin: "0 0 16px" }}>Blocking</h2>
+
+      {/* ── Status: what is blocked right now, and why ── */}
+      <div style={{
+        ...card(), marginBottom: 14,
+        background: status.active ? K.err + "12" : K.card,
+        border: `1px solid ${status.active ? K.err + "40" : K.border}`,
+      }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+          <div style={{
+            width: 38, height: 38, borderRadius: 11, flexShrink: 0, fontSize: 18,
+            background: status.active ? K.err + "22" : K.accDim,
+            display: "flex", alignItems: "center", justifyContent: "center",
+          }}>{status.active ? "🛡" : "🕊"}</div>
+          <div style={{ flex: 1, minWidth: 0 }}>
+            <div style={{ fontSize: 14.5, fontWeight: 600, color: K.txt }}>{status.headline}</div>
+            <div style={{ fontSize: 11.5, color: K.sub, marginTop: 2 }}>{status.detail}</div>
+            {verdict.focus.active && (
+              <div style={{ fontSize: 11, color: K.acc, marginTop: 4 }}>
+                Focus session · {verdict.focus.minutesLeft}m left
+              </div>
+            )}
+          </div>
+        </div>
+      </div>
+
+      {/* ── Configured here vs enforced elsewhere (from the shared table) ── */}
+      <div style={{ ...card(), marginBottom: 24 }}>
+        <div style={{ fontSize: 10, letterSpacing: 0.6, color: K.sub, marginBottom: 9 }}>WHERE THIS IS ENFORCED</div>
+        {ENFORCEMENT_ROWS.map(({ kind, cap, client }) => {
+          const c = CLIENT_CAPABILITIES[cap];
+          const on = kind === "websites" ? verdict.websites.length : verdict.apps.length;
+          return (
+            <div key={kind} style={{ display: "flex", gap: 10, alignItems: "flex-start", marginBottom: 10 }}>
+              <span aria-hidden="true" style={{ fontSize: 13 }}>{c.enforceWebsites || c.enforceApps ? "✅" : "—"}</span>
+              <div style={{ flex: 1 }}>
+                <div style={{ fontSize: 12.5, fontWeight: 600, color: K.txt }}>
+                  {kind === "websites" ? "Websites" : "Applications"} → {client}
+                  {on > 0 && <span style={{ color: K.err }}> · {on} active now</span>}
+                </div>
+                <div style={{ fontSize: 10.5, color: K.sub, lineHeight: 1.5, marginTop: 1 }}>{c.note}</div>
+              </div>
+            </div>
+          );
+        })}
+        <div style={{ height: 1, background: K.border, margin: "2px 0 10px" }} />
+        <div style={{ fontSize: 10.5, color: K.sub, lineHeight: 1.6 }}>
+          This page stores your rules in your account and shows what they do. It cannot
+          block a browser or an OS application itself — sign in to the NORTH extension
+          and desktop app with the same account so they can enforce these rules.
+          {" "}On mobile, iOS and Android only permit app limits through an OS-granted
+          entitlement, which NORTH does not ship yet.
+        </div>
+      </div>
+
+      {err && (
+        <div role="alert" style={{ fontSize: 12, color: K.err, background: K.err + "14", borderRadius: 8, padding: "8px 10px", marginBottom: 14 }}>{err}</div>
+      )}
+
+      {/* ── Websites ── */}
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 12 }}>
+        <div>
+          <div style={{ fontSize: 14, fontWeight: 600, color: K.txt }}>Websites</div>
+          <div style={{ fontSize: 11, color: K.sub, marginTop: 2 }}>
+            {grouped.websites.length ? `${grouped.websites.length} rule${grouped.websites.length === 1 ? "" : "s"}` : "No domains yet"}
+          </div>
+        </div>
+        {addButton(showSite, setShowSite, "Add a website")}
+      </div>
+
+      {showSite && (
+        <div style={{ ...card(), marginBottom: 12, display: "flex", gap: 7 }}>
+          <input autoFocus style={{ ...inpSt(), flex: 1 }} placeholder="youtube.com"
+            value={site} onChange={(e) => setSite(e.target.value)}
+            onKeyDown={(e) => { if (e.key === "Enter") addWebsite(); }} />
+          <button type="button" className="b" onClick={addWebsite}
+            style={{ padding: "9px 16px", borderRadius: 10, background: K.acc, color: "#fff", fontSize: 12.5, fontWeight: 600 }}>Add</button>
+        </div>
+      )}
+
+      {grouped.websites.length === 0 && !showSite ? (
+        <div style={{ ...card(), textAlign: "center", color: K.muted, fontSize: 12.5, padding: "26px 14px", marginBottom: 22 }}>
+          Block a domain to stop the extension loading it
+        </div>
+      ) : (
+        <div style={{ marginBottom: 22 }}>{grouped.websites.map((r) => <RuleRow key={r.id} rule={r} />)}</div>
+      )}
+
+      {/* ── Applications ── */}
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 12 }}>
+        <div>
+          <div style={{ fontSize: 14, fontWeight: 600, color: K.txt }}>Applications</div>
+          <div style={{ fontSize: 11, color: K.sub, marginTop: 2 }}>
+            {grouped.apps.length ? `${grouped.apps.length} rule${grouped.apps.length === 1 ? "" : "s"} · ended by the desktop app` : "No applications yet"}
+          </div>
+        </div>
+        {addButton(showAppRule, setShowAppRule, "Add an application")}
+      </div>
+
+      {showAppRule && (
+        <div style={{ ...card(), marginBottom: 12, display: "flex", gap: 7 }}>
+          <input autoFocus style={{ ...inpSt(), flex: 1 }} placeholder="Application name (e.g. Steam)"
+            value={appName} onChange={(e) => setAppName(e.target.value)}
+            onKeyDown={(e) => { if (e.key === "Enter") addAppRule(); }} />
+          <button type="button" className="b" onClick={addAppRule}
+            style={{ padding: "9px 16px", borderRadius: 10, background: K.acc, color: "#fff", fontSize: 12.5, fontWeight: 600 }}>Add</button>
+        </div>
+      )}
+
+      {grouped.apps.length === 0 && !showAppRule ? (
+        <div style={{ ...card(), textAlign: "center", color: K.muted, fontSize: 12.5, padding: "26px 14px", marginBottom: 22 }}>
+          Name an application to keep it closed while a rule is active
+        </div>
+      ) : (
+        <div style={{ marginBottom: 22 }}>{grouped.apps.map((r) => <RuleRow key={r.id} rule={r} />)}</div>
+      )}
+
+      {/* ── Schedules ── */}
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 12 }}>
+        <div>
+          <div style={{ fontSize: 14, fontWeight: 600, color: K.txt }}>Schedules</div>
+          <div style={{ fontSize: 11, color: K.sub, marginTop: 2 }}>
+            {blocking.schedules.length ? `${blocking.schedules.length} window${blocking.schedules.length === 1 ? "" : "s"}` : "Block only during set hours"}
+          </div>
+        </div>
+        {addButton(showSched, setShowSched, "Add a schedule")}
+      </div>
+
+      {showSched && (
+        <div style={{ ...card(), marginBottom: 12 }}>
+          <input style={{ ...inpSt(), marginBottom: 10 }} placeholder="Schedule name"
+            value={draft.name} onChange={(e) => setDraft((d) => ({ ...d, name: e.target.value }))} />
+          <div style={{ fontSize: 11, color: K.sub, marginBottom: 6 }}>Days</div>
+          <div style={{ display: "flex", gap: 4, flexWrap: "wrap", marginBottom: 12 }}>
+            {WEEKDAY_LABELS.map((lbl, i) => {
+              const on = draft.days.includes(i);
+              return (
+                <button key={lbl} type="button" className="b"
+                  onClick={() => setDraft((d) => ({
+                    ...d, days: on ? d.days.filter((x) => x !== i) : [...d.days, i].sort((a, b) => a - b),
+                  }))}
+                  aria-pressed={on} aria-label={`${lbl}${on ? " on" : " off"}`}
+                  style={{ ...tag(on, K.acc), padding: "5px 10px", fontSize: 11 }}>{lbl}</button>
+              );
+            })}
+            <button type="button" className="b" onClick={() => setDraft((d) => ({ ...d, days: [...WORKDAYS] }))}
+              style={{ ...tag(false, K.acc), padding: "5px 10px", fontSize: 11 }}>Weekdays</button>
+          </div>
+          <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 14 }}>
+            <input type="time" style={{ ...inpSt(), width: 118, color: K.sub }} value={draft.start}
+              aria-label="Schedule start time"
+              onChange={(e) => setDraft((d) => ({ ...d, start: e.target.value }))} />
+            <span style={{ fontSize: 12, color: K.sub }}>to</span>
+            <input type="time" style={{ ...inpSt(), width: 118, color: K.sub }} value={draft.end}
+              aria-label="Schedule end time"
+              onChange={(e) => setDraft((d) => ({ ...d, end: e.target.value }))} />
+          </div>
+          <div style={{ display: "flex", gap: 6 }}>
+            <button type="button" className="b" onClick={() => setShowSched(false)}
+              style={{ flex: 1, padding: "8px 0", borderRadius: 8, background: K.surf, color: K.sub, fontSize: 12 }}>Cancel</button>
+            <button type="button" className="b" onClick={addSchedule}
+              style={{ flex: 2, padding: "8px 0", borderRadius: 8, background: K.acc, color: "#fff", fontSize: 12, fontWeight: 600 }}>Add schedule</button>
+          </div>
+        </div>
+      )}
+
+      {blocking.schedules.length === 0 && !showSched ? (
+        <div style={{ ...card(), textAlign: "center", color: K.muted, fontSize: 12.5, padding: "26px 14px", marginBottom: 22 }}>
+          Add a window, then point a rule at it
+        </div>
+      ) : (
+        <div style={{ marginBottom: 22 }}>
+          {blocking.schedules.map((sc) => {
+            const running = verdict.schedules.some((r) => r.id === sc.id);
+            return (
+              <div key={sc.id} style={{ ...card2(), marginBottom: 8, border: `1px solid ${running ? K.ok + "50" : K.border}` }}>
+                <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                  <div style={{ flex: 1, minWidth: 0 }}>
+                    <div style={{ fontSize: 13.5, fontWeight: 500, color: K.txt, display: "flex", alignItems: "center", gap: 6 }}>
+                      <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{sc.name}</span>
+                      {running && <span style={{ fontSize: 9, fontWeight: 700, color: K.ok, background: K.ok + "20", padding: "1px 5px", borderRadius: 10, flexShrink: 0 }}>RUNNING</span>}
+                    </div>
+                    <div style={{ fontSize: 10.5, color: K.sub, marginTop: 2 }}>
+                      {sc.days.map((d) => WEEKDAY_LABELS[d]).join(" ")} · {sc.start}–{sc.end}
+                      {sc.start > sc.end ? " (overnight)" : ""}
+                    </div>
+                  </div>
+                  <Toggle on={sc.enabled} label={sc.name}
+                    onToggle={() => persist(upsertSchedule(blocking, { ...sc, enabled: !sc.enabled }))} />
+                  <button type="button" className="b" onClick={() => persist(removeSchedule(blocking, sc.id))}
+                    aria-label={`Delete the schedule ${sc.name}`}
+                    style={{ color: K.muted, display: "flex", alignItems: "center", justifyContent: "center", padding: 4, flexShrink: 0 }}>
+                    <Trash2 size={15} color={K.muted} />
+                  </button>
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      )}
+
+      {/* ── Usage (manual, and labelled as such) ── */}
+      <AppUsage user={user} />
+      <div style={{ height: 40 }} aria-hidden="true" />
+
+      {menu && <ContextMenu menu={menu} onClose={closeMenu} />}
+    </div>
+  );
+}
+
+// ══════════════════════════════════════════════════════════════════════════
 // SOCIAL / LEADERBOARD
 // ══════════════════════════════════════════════════════════════════════════
 const MEDALS = ["🥇", "🥈", "🥉"];
@@ -1288,14 +2328,21 @@ function Social({ user }) {
   const myRank = board.findIndex((e) => e.un === user.un) + 1;
   const myData = board.find((e) => e.un === user.un);
   const fBoard = board.filter((e) => friends.includes(e.un));
+  const others = board.filter((e) => e.un !== user.un);
 
   const doAdd = async () => {
     const un = fi.toLowerCase().trim();
     if (!un) return;
     if (un === user.un)        return setFerr("Can't add yourself.");
     if (friends.includes(un)) return setFerr("Already friends.");
-    const ex = await S.get(`u:${un}`);
-    if (!ex)                   return setFerr("User not found.");
+    // A username is public on the leaderboard but nothing else is: an account
+    // row is only readable by its owner (profiles_self in the schema), so the
+    // leaderboard is what tells us the account exists — which is also the only
+    // thing we need, since friendships are stored as usernames.
+    const keys = await S.list("lb:", true);
+    if (!keys.includes(`lb:${un}`)) {
+      return setFerr("No NORTH account with that username yet.");
+    }
     const nf = [...friends, un];
     setFriends(nf); setFi(""); setFerr("");
     const u = (await S.get(`u:${user.un}`)) || {};
@@ -1330,7 +2377,15 @@ function Social({ user }) {
           {e.un === user.un && <span style={{ fontSize: 10, color: K.acc, marginLeft: 6 }}>you</span>}
         </div>
         <div style={{ fontSize: 10, color: K.sub, marginTop: 1 }}>
-          {e.tc || 0} tasks · {e.streak || 0}d streak
+          {/* Only show a stat this entry actually has. The public leaderboard
+              aggregate carries focus minutes and active days; completed tasks
+              and streaks are private, so they are omitted rather than shown
+              as a misleading zero. */}
+          {Number.isFinite(e.tc) && Number.isFinite(e.streak)
+            ? `${e.tc} tasks · ${e.streak}d streak`
+            : Number.isFinite(e.activeDays) && e.activeDays > 0
+              ? `${e.activeDays} active day${e.activeDays === 1 ? "" : "s"}`
+              : ""}
         </div>
       </div>
       <div style={{ textAlign: "right", flexShrink: 0 }}>
@@ -1339,16 +2394,16 @@ function Social({ user }) {
       </div>
       {rm && <button type="button" className="b" onClick={() => rmFriend(e.un)}
         aria-label={`Remove ${e.name || e.un} from friends`}
-        style={{ color: K.muted, fontSize: 18, padding: 4, lineHeight: 1 }}>×</button>}
+        style={{ color: K.muted, display: "flex", alignItems: "center", justifyContent: "center", padding: 4 }}><X size={15} color={K.muted} /></button>}
     </div>
   );
 
   return (
-    <div style={{ padding: "20px 16px" }}>
+    <div style={{ padding: "24px 20px 8px", maxWidth: 900, margin: "0 auto", width: "100%", boxSizing: "border-box" }}>
       <h2 style={{ color: K.txt, fontSize: 18, fontWeight: 600, margin: "0 0 16px" }}>Social</h2>
 
-      {/* My rank card */}
-      {myData && (
+      {/* My rank card — only shown when there are actually other users */}
+      {others.length > 0 && myData && (
         <div style={{
           ...card(), marginBottom: 20,
           background: K.accDim,
@@ -1390,9 +2445,19 @@ function Social({ user }) {
       {loading ? (
         <div style={{ textAlign: "center", color: K.muted, padding: 40 }}>Loading…</div>
       ) : tab === "board" ? (
-        board.length === 0
-          ? <div style={{ textAlign: "center", color: K.muted, fontSize: 13, padding: 40 }}>No users yet 🏆</div>
-          : board.slice(0, 25).map((e, i) => <Row key={e.un} e={e} rank={i + 1} />)
+        others.length === 0 ? (
+          <div style={{ ...card(), textAlign: "center", padding: "34px 18px" }}>
+            <div style={{
+              width: 52, height: 52, borderRadius: 16, background: K.accDim, margin: "0 auto 12px",
+              display: "flex", alignItems: "center", justifyContent: "center",
+            }}><Users size={24} color={K.acc} /></div>
+            <div style={{ fontSize: 15, fontWeight: 700, color: K.txt }}>Your leaderboard is fresh</div>
+            <div style={{ fontSize: 12, color: K.sub, marginTop: 6, lineHeight: 1.6, maxWidth: 330, marginLeft: "auto", marginRight: "auto" }}>
+              You're the first one here. Rankings are live and server-computed —
+              they fill up as more people join NORTH on any client.
+            </div>
+          </div>
+        ) : board.slice(0, 25).map((e, i) => <Row key={e.un} e={e} rank={i + 1} />)
       ) : (
         <div>
           <div style={{ display: "flex", gap: 7, marginBottom: 8 }}>
@@ -1406,7 +2471,13 @@ function Social({ user }) {
           </div>
           {ferr && <div style={{ color: K.err, fontSize: 12, marginBottom: 10 }}>{ferr}</div>}
           {friends.length === 0 ? (
-            <div style={{ textAlign: "center", color: K.muted, fontSize: 13, padding: 30 }}>Add friends to compete 👥</div>
+            <div style={{ ...card(), textAlign: "center", padding: "30px 16px" }}>
+              <div style={{ fontSize: 24, marginBottom: 8 }}>👋</div>
+              <div style={{ fontSize: 13, color: K.txt, fontWeight: 600 }}>No friends yet</div>
+              <div style={{ fontSize: 11.5, color: K.sub, marginTop: 5, lineHeight: 1.6, maxWidth: 300, marginLeft: "auto", marginRight: "auto" }}>
+                Add anyone on the leaderboard by their username, from any device.
+              </div>
+            </div>
           ) : fBoard.length === 0 ? (
             <div style={{ textAlign: "center", color: K.muted, fontSize: 12, padding: 20 }}>Friends haven't used the app yet</div>
           ) : (
@@ -1505,7 +2576,7 @@ function Boards({ user }) {
   const bTasks = board ? tasks.filter((t) => t.boardId === board.id) : [];
 
   return (
-    <div style={{ padding: "20px 16px" }}>
+    <div style={{ padding: "24px 20px 8px", maxWidth: 900, margin: "0 auto", width: "100%", boxSizing: "border-box" }}>
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 14 }}>
         <div>
           <h2 style={{ color: K.txt, fontSize: 18, fontWeight: 600, margin: 0 }}>Boards</h2>
@@ -1584,7 +2655,7 @@ function Boards({ user }) {
           <div style={{ fontSize: 11, color: K.sub, marginTop: 4 }}>Create one and drag tasks into To do / Doing / Done</div>
         </div>
       ) : (
-        <div style={{ display: "flex", gap: 10, overflowX: "auto", alignItems: "flex-start", paddingBottom: 6, margin: "0 -16px", paddingLeft: 16, paddingRight: 16 }}>
+        <div style={{ display: "flex", gap: 10, overflowX: "auto", alignItems: "flex-start", paddingBottom: 6, margin: "0 -20px", paddingLeft: 20, paddingRight: 20 }}>
           {board.cols.map((c) => {
             const cards = bTasks.filter((t) => t.colId === c.id);
             const ci = B_COLS.indexOf(c.id);
@@ -1678,35 +2749,158 @@ export default function App() {
   const [user,  setUser]  = useState(null);
   const [tab,   setTab]   = useState("home");
   const [boot,  setBoot]  = useState(true);
-  // Theme follows the device automatically (light or dark) with no manual
-  // toggle — the Apple approach. `K` below picks the matching palette.
-  const [dark] = useState(() => {
-    try { return window.matchMedia ? window.matchMedia("(prefers-color-scheme: dark)").matches : false; }
-    catch { return false; }
+  const [scrl,  setScrl]  = useState(false); // content overlapping the sticky header?
+  // Default theme is LIGHT; the header switch flips it and the choice is
+  // remembered on this device only (never synced account data).
+  const [dark, setDark] = useState(() => {
+    try {
+      const v = localStorage.getItem("fl_th");
+      if (v === "1") return true;
+      if (v === "0") return false;
+    } catch {}
+    return false; // default: light
   });
   K = dark ? D : L; // activate palette for this render pass
 
+  // Right-click policy — also device-local, initialised from storage and
+  // activated for this render pass the same way the palette is.
+  const [ctx, setCtx] = useState(readCtxPreference);
+  CTX = ctxMode(ctx);
+
   useEffect(() => {
-    S.get("sess").then(async (s) => {
-      if (s?.un) {
-        const u = await S.get(`u:${s.un}`);
-        if (u) setUser({ un: s.un, ...u });
-      }
-      setBoot(false);
+    try { localStorage.setItem("fl_th", dark ? "1" : "0"); } catch {}
+  }, [dark]);
+
+  useEffect(() => {
+    try { localStorage.setItem("fl_ctx", ctxMode(ctx)); } catch {}
+  }, [ctx]);
+
+  // A password-reset link signs the person in with a PASSWORD_RECOVERY session.
+  // Catch that event and route to the set-a-new-password screen instead of
+  // silently dropping them into the app.
+  const [recovery, setRecovery] = useState(false);
+  useEffect(() => {
+    if (!supabaseConfigured || !supabase) return undefined;
+    const { data } = supabase.auth.onAuthStateChange((event) => {
+      if (event === "PASSWORD_RECOVERY") setRecovery(true);
     });
+    return () => { try { data?.subscription?.unsubscribe(); } catch { /* already gone */ } };
   }, []);
 
-  const login  = async (u) => { setUser(u); await S.set("sess", { un: u.un }); };
-  const logout = async ()  => { await S.del("sess"); setUser(null); setTab("home"); };
+  const toggleTheme = () => setDark((d) => !d);
+
+  // Scroll-edge chrome (apple-design skill §12): the frosted header carries no
+  // hard divider — a hairline appears only once content actually scrolls under
+  // it, then disappears again at the top of the page.
+  useEffect(() => {
+    const on = () => setScrl(window.scrollY > 2);
+    on();
+    window.addEventListener("scroll", on, { passive: true });
+    return () => window.removeEventListener("scroll", on);
+  }, []);
+
+  // ── ACCOUNT ──────────────────────────────────────────────────────────────
+  // One load path for the device record: boot, sign-in and navigation all go
+  // through `loadProfile`, so a profile is never half-hydrated. `hydrateProfile`
+  // fills in defaults and upgrades records written before blocking existed.
+  async function loadProfile(un) {
+    if (!un) return null;
+    const raw = await S.get(PROFILE_KEY(un));
+    return raw ? hydrateProfile(raw, { un, migrate: migrateLegacy }) : null;
+  }
+
+  const saveProfile = async (profile) => S.set(PROFILE_KEY(profile.un), profile);
+
+  /**
+   * A profile stored under a different username but the same email — an account
+   * first created with a username, later signed into with Google. Without this
+   * lookup the same person would silently get a second, empty profile.
+   */
+  const findProfileByEmail = async (email) => {
+    if (!email) return null;
+    const keys = await S.list("u:");
+    for (const key of keys) {
+      const raw = await S.get(key);
+      if (raw?.email && String(raw.email).toLowerCase() === String(email).toLowerCase()) return raw;
+    }
+    return null;
+  };
+
+  /**
+   * THE single place an app user is built. Previously the Supabase user was
+   * passed straight in, so `un` was undefined, every screen read `u:undefined`,
+   * and the header crashed on `(user.name || user.un)[0]`. Now identity comes
+   * from the shared mapper and the profile is created on first sign-in.
+   */
+  const adoptAccount = async (accountUser) => {
+    const un = usernameFromEmail(accountUser?.email, accountUser?.id);
+    const existing =
+      (await loadProfile(un)) || (await findProfileByEmail(accountUser?.email));
+    const profile =
+      existing ||
+      defaultProfile({
+        un,
+        name: accountUser?.user_metadata?.name,
+        email: accountUser?.email,
+      });
+    if (!existing) await saveProfile(profile);
+    const mapped = toAppUser(accountUser, profile);
+    await S.set(SESSION_KEY, { un: mapped.un });
+
+    // Link this device to the account and adopt the account's copy of the data.
+    // `bootstrap` pushes what this device already holds *before* pulling, so a
+    // record made before signing in is never discarded by the first sync.
+    SYNC.attach({ userId: accountUser?.id, un: mapped.un });
+    if (accountUser?.id) {
+      await SYNC.bootstrap(mapped.un).catch(() => {});
+      const fromAccount = await loadProfile(mapped.un);
+      if (fromAccount) return toAppUser(accountUser, fromAccount);
+    }
+    return mapped;
+  };
+
+  const login = async (accountUser) => setUser(await adoptAccount(accountUser));
+
+  const logout = async () => {
+    // Sign out of the account service too — otherwise the Supabase session
+    // survives and the person is silently signed back in on reload.
+    try { if (supabaseConfigured && supabase) await supabase.auth.signOut(); } catch {}
+    await S.del(SESSION_KEY);
+    SYNC.detach();
+    setUser(null);
+    setTab("home");
+  };
+
+  // Boot: the device record first (so the app works offline and with no account
+  // service configured), then Supabase's own session, which wins over it.
+  useEffect(() => {
+    let dead = false;
+    (async () => {
+      try {
+        const sess = await S.get(SESSION_KEY);
+        if (sess?.un) {
+          const u = await loadProfile(sess.un);
+          if (u && !dead) setUser(u);
+        }
+        if (supabaseConfigured && supabase) {
+          const { data } = await supabase.auth.getSession();
+          if (data?.session?.user && !dead) setUser(await adoptAccount(data.session.user));
+        }
+      } catch { /* a broken account service must never block boot */ }
+      if (!dead) setBoot(false);
+    })();
+    return () => { dead = true; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   // Every screen renders from the in-memory `user` object, but edits (tasks,
-  // friends, apps) are persisted to storage by whichever screen made them.
-  // Reload the user record on navigation so no screen shows stale data after
-  // another screen changed it.
+  // friends, apps, block rules) are persisted to storage by whichever screen
+  // made them. Reload the user record on navigation so no screen shows stale
+  // data after another screen changed it.
   const goTab = (id) => {
     setTab(id);
-    S.get(`u:${user.un}`).then((u) => {
-      if (u) setUser((p) => (p && p.un === user.un ? { un: user.un, ...u } : p));
+    loadProfile(user.un).then((u) => {
+      if (u) setUser((p) => (p && p.un === user.un ? u : p));
     });
   };
   const TABS = [
@@ -1715,7 +2909,7 @@ export default function App() {
     { id: "tasks",    I: ListChecks, lbl: "Tasks"  },
     { id: "boards",   I: LayoutGrid, lbl: "Boards" },
     { id: "calendar", I: Calendar,   lbl: "Cal"    },
-    { id: "apps",     I: Shield,     lbl: "Apps"   },
+    { id: "block",    I: Shield,     lbl: "Block"  },
     { id: "social",   I: Users,      lbl: "Social" },
   ];
 
@@ -1725,7 +2919,7 @@ export default function App() {
     tasks:    <Tasks    user={user} />,
     boards:   <Boards   user={user} />,
     calendar: <Cal      user={user} />,
-    apps:     <Apps     user={user} />,
+    block:    <Blocking user={user} />,
     social:   <Social   user={user} />,
   } : {};
 
@@ -1734,86 +2928,82 @@ export default function App() {
     <>
       {G(dark)}
       <div style={{ minHeight: "100vh", background: K.bg, display: "flex", alignItems: "center", justifyContent: "center" }}>
-        <Zap size={36} color={K.acc} />
+        <Compass size={36} color={K.acc} />
       </div>
     </>
   );
 
   /* ── AUTH ── */
-  if (!user) return <Auth onLogin={login} dark={dark} />;
+  if (!user) return <Auth onLogin={login} dark={dark} onTheme={toggleTheme} />;
 
-  /* ── APP SHELL ── */
+  /* ── PASSWORD RESET (arrived from the reset email) ── */
+  if (recovery) {
+    return <SetPassword onDone={() => setRecovery(false)} dark={dark} onTheme={toggleTheme} />;
+  }
+
+  /* ── APP SHELL (website layout: top bar + nav row, no phone frame) ── */
   return (
-    <div style={{
-      minHeight: "100vh", background: K.bg, fontFamily: FONT,
-      maxWidth: 480, margin: "0 auto", display: "flex", flexDirection: "column",
-      position: "relative",
-    }}>
+    <div style={{ minHeight: "100vh", background: K.bg, fontFamily: FONT }}>
       {G(dark)}
-      {/* ─ Header ─ */}
-      <div style={{
-        padding: "12px 16px", borderBottom: `1px solid ${K.border}`,
-        display: "flex", alignItems: "center", justifyContent: "space-between",
-        position: "sticky", top: 0, zIndex: 10,
-        background: dark ? "rgba(20, 20, 22, 0.78)" : "rgba(249, 249, 251, 0.8)",
-        backdropFilter: "saturate(180%) blur(18px)",
-        WebkitBackdropFilter: "saturate(180%) blur(18px)",
+      <header className="mtrl" style={{
+        position: "sticky", top: 0, zIndex: 20,
+        background: dark ? "rgba(16, 16, 18, 0.72)" : "rgba(249, 249, 251, 0.78)",
+        backdropFilter: "saturate(180%) blur(20px)",
+        WebkitBackdropFilter: "saturate(180%) blur(20px)",
+        boxShadow: scrl ? (dark ? "0 1px 0 rgba(255,255,255,.06)" : "0 1px 0 rgba(0,0,0,.07)") : "none",
+        transition: "box-shadow .25s ease",
       }}>
-        <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-          <div style={{
-            width: 26, height: 26, borderRadius: 7,
-            background: K.acc,
-            display: "flex", alignItems: "center", justifyContent: "center",
-          }}><Zap size={14} color="#fff" fill="#fff" /></div>
-          <span style={{ fontSize: 15, fontWeight: 700, color: K.txt, letterSpacing: -0.2 }}>Focusly</span>
+        <div style={{ maxWidth: 1120, margin: "0 auto", padding: "10px 20px 0", boxSizing: "border-box" }}>
+          <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12 }}>
+            {/* Brand */}
+            <div style={{ display: "flex", alignItems: "center", gap: 9 }}>
+              <div style={{ width: 28, height: 28, borderRadius: 8, background: K.acc, display: "flex", alignItems: "center", justifyContent: "center" }}>
+                <Compass size={16} color="#fff" />
+              </div>
+              <span style={{ fontSize: 16, fontWeight: 800, color: K.txt, letterSpacing: -0.3 }}>NORTH</span>
+            </div>
+            {/* Actions */}
+            <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+              <ThemeSwitch dark={dark} onToggle={toggleTheme} />
+              <Preferences ctx={ctxMode(ctx)} onCtx={setCtx} />
+              <div
+                title={displayName(user)}
+                aria-label={`Signed in as ${displayName(user)}`}
+                style={{
+                  width: 28, height: 28, borderRadius: 8, background: K.acc,
+                  display: "flex", alignItems: "center", justifyContent: "center",
+                  color: "#fff", fontSize: 12, fontWeight: 800,
+                }}>{initial(user)}</div>
+              <button type="button" className="b" onClick={logout}
+                style={{ fontSize: 12, color: K.sub, padding: "4px 2px" }}>Sign out</button>
+            </div>
+          </div>
+          {/* Nav row */}
+          <nav aria-label="Main" style={{ display: "flex", gap: 2, overflowX: "auto", padding: "6px 0 10px" }}>
+            {TABS.map((t) => (
+              <button key={t.id} type="button" className="b nv" onClick={() => goTab(t.id)}
+                aria-current={tab === t.id ? "page" : undefined}
+                style={{
+                  display: "flex", alignItems: "center", gap: 6, whiteSpace: "nowrap",
+                  padding: "6px 12px", borderRadius: 9,
+                  background: tab === t.id ? K.accDim : "transparent",
+                  color: tab === t.id ? K.acc : K.sub,
+                  fontWeight: tab === t.id ? 700 : 500,
+                  fontSize: 12.5, transition: "background-color .15s ease",
+                }}>
+                <t.I aria-hidden="true" size={15} strokeWidth={2.2} color={tab === t.id ? K.acc : K.muted} />
+                {t.lbl}
+              </button>
+            ))}
+          </nav>
         </div>
-        <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-          <div style={{
-            width: 26, height: 26, borderRadius: 7,
-            background: K.acc,
-            display: "flex", alignItems: "center", justifyContent: "center",
-            color: "#fff", fontSize: 11, fontWeight: 800,
-          }}>{(user.name || user.un)[0].toUpperCase()}</div>
-          <button type="button" className="b" onClick={logout}
-            style={{ fontSize: 11, color: K.muted, padding: "4px 2px" }}>Sign out</button>
-        </div>
-      </div>
+      </header>
 
       {/* ─ Content ─ */}
-      <div style={{ flex: 1, overflowY: "auto", paddingBottom: 80 }}>
+      <main key={tab} className="pge" style={{ width: "100%", maxWidth: 1120, margin: "0 auto", boxSizing: "border-box" }}>
         {pages[tab]}
-      </div>
-
-      {/* ─ Bottom Nav ─ */}
-      <nav aria-label="Main" style={{
-        position: "fixed", bottom: 0, left: "50%", transform: "translateX(-50%)",
-        width: "100%", maxWidth: 480,
-        background: dark ? "rgba(20, 20, 22, 0.8)" : "rgba(249, 249, 251, 0.85)",
-        backdropFilter: "saturate(180%) blur(18px)",
-        WebkitBackdropFilter: "saturate(180%) blur(18px)",
-        borderTop: `1px solid ${K.border}`, display: "flex",
-        padding: "4px 0 10px", zIndex: 20,
-      }}>
-        {TABS.map((t) => (
-          <button key={t.id} type="button" className="b" onClick={() => goTab(t.id)}
-            aria-current={tab === t.id ? "page" : undefined}
-            style={{
-              flex: 1, display: "flex", flexDirection: "column",
-              alignItems: "center", justifyContent: "center", gap: 2, padding: "6px 0 2px",
-            }}>
-            <t.I aria-hidden="true" size={17} strokeWidth={2}
-              color={tab === t.id ? K.acc : K.muted}
-              style={{ transition: "all .15s", transform: tab === t.id ? "translateY(-1px)" : "none" }} />
-            <span style={{
-              fontSize: 9, fontWeight: tab === t.id ? 700 : 400,
-              color: tab === t.id ? K.acc : K.muted, letterSpacing: 0.4,
-            }}>{t.lbl.toUpperCase()}</span>
-            {tab === t.id && (
-              <span aria-hidden="true" style={{ width: 3, height: 3, borderRadius: "50%", background: K.acc, marginTop: 1 }} />
-            )}
-          </button>
-        ))}
-      </nav>
+        <div style={{ height: 60 }} aria-hidden="true" />
+      </main>
     </div>
   );
 }

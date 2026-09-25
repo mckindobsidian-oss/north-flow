@@ -1,5 +1,5 @@
 /**
- * Focusly — shared domain types.
+ * NORTH — shared domain types.
  *
  * Canonical shapes for the data that flows between every client (web,
  * extension, desktop, mobile) and the future Supabase backend. JS consumers
@@ -106,6 +106,86 @@ export interface UsageRecord {
   kind: "website" | "app";
   name: string; // domain or app name
   seconds: number;
+}
+
+// ── BLOCKING (the model every client shares) ──────────────────────────────
+// Implemented in ./blocking.js — these interfaces describe the same shapes the
+// engine validates and evaluates, so a TS consumer cannot drift from it.
+
+export type RuleKind = "website" | "app";
+
+/** When a rule applies. `focus` = only while a focus session runs. */
+export type RuleWhen = "always" | "focus" | "scheduled";
+
+export interface BlockRule {
+  id: string;
+  kind: RuleKind;
+  /** Normalized host ("youtube.com") for websites, display name for apps. */
+  target: string;
+  label: string;
+  enabled: boolean;
+  when: RuleWhen;
+  /** Used when when === "scheduled"; empty means "any running schedule". */
+  scheduleIds: string[];
+  createdAt: number;
+}
+
+export interface BlockSchedule {
+  id: string;
+  name: string;
+  /** 0 = Sunday … 6 = Saturday (mirrors Date#getDay on every client). */
+  days: number[];
+  /** "HH:MM". A window may cross midnight; start === end never blocks. */
+  start: string;
+  end: string;
+  enabled: boolean;
+}
+
+export interface BlockingSettings {
+  blockDuringFocus: boolean;
+  allowTemporaryUnblock: boolean;
+  tempUnblockMinutes: number;
+}
+
+export interface FocusWindow {
+  startedAt: number;
+  minutes: number;
+  /** Epoch ms; the session ends by itself, no cleanup call needed. */
+  endAt: number;
+}
+
+export interface BlockingState {
+  version: 2;
+  rules: BlockRule[];
+  schedules: BlockSchedule[];
+  settings: BlockingSettings;
+  /** ruleId → epoch ms until which that rule is paused. */
+  unblocks: Record<string, number>;
+  focus: FocusWindow | null;
+}
+
+export type BlockReason = "always" | "focus" | `schedule:${string}` | "temp-unblock";
+
+/** What `evaluateBlocking()` returns: the one verdict every client enforces. */
+export interface BlockingVerdict {
+  active: boolean;
+  websites: string[];
+  /** Lowercase keys, matched case-insensitively against OS process names. */
+  apps: string[];
+  appLabels: string[];
+  reasons: Record<string, { reason: BlockReason; target: string; kind: RuleKind; until?: number }>;
+  focus: { active: boolean; endsAt: number; minutesLeft: number };
+  schedules: { id: string; name: string; end: string }[];
+}
+
+/** What each client is genuinely allowed to enforce (see ARCHITECTURE.md §1). */
+export interface ClientCapability {
+  id: "web" | "extension" | "desktop" | "mobile";
+  label: string;
+  configure: boolean;
+  enforceWebsites: boolean;
+  enforceApps: boolean;
+  note: string;
 }
 
 /** Google Calendar integration state — secrets live server-side only. */

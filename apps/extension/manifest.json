@@ -1,13 +1,13 @@
 {
   "manifest_version": 3,
-  "name": "Focusly — Focus & Website Blocker",
-  "version": "0.1.0",
-  "description": "Focus sessions, distracting-site blocking and website screen-time, synced with your Focusly account.",
+  "name": "NORTH — Focus & Website Blocker",
+  "version": "0.2.0",
+  "description": "Focus sessions, scheduled website blocking and private screen-time, driven by the same block rules as the NORTH web and desktop apps.",
   "permissions": ["storage", "alarms", "tabs", "notifications", "declarativeNetRequest"],
   "host_permissions": ["<all_urls>"],
-  "background": { "service_worker": "background.js" },
+  "background": { "service_worker": "background.js", "type": "module" },
   "action": {
     "default_popup": "popup.html",
-    "default_title": "Focusly"
+    "default_title": "NORTH"
   }
 }

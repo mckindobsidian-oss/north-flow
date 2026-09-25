@@ -1,17 +1,17 @@
 {
   "expo": {
-    "name": "Focusly",
-    "slug": "focusly",
+    "name": "NORTH",
+    "slug": "north",
     "version": "0.1.0",
     "orientation": "portrait",
     "userInterfaceStyle": "automatic",
     "newArchEnabled": true,
     "ios": {
       "supportsTablet": true,
-      "bundleIdentifier": "com.focusly.mobile"
+      "bundleIdentifier": "com.north.mobile"
     },
     "android": {
-      "package": "com.focusly.mobile",
+      "package": "com.north.mobile",
       "edgeToEdgeEnabled": true
     }
   }

@@ -3,11 +3,20 @@
   <head>
     <meta charset="UTF-8" />
     <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>react-app</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+    <meta name="color-scheme" content="light dark" />
+    <meta name="description" content="NORTH — a focus timer, tasks and kanban boards, calendar, screen-time tracker and website blocker in one account, on web, desktop, mobile and browser." />
+    <!-- Paints the OS chrome (mobile address bar, window chrome) in the app's
+         own canvas colour instead of a white default, and follows the theme. -->
+    <meta name="theme-color" media="(prefers-color-scheme: light)" content="#F2F2F7" />
+    <meta name="theme-color" media="(prefers-color-scheme: dark)" content="#000000" />
+    <meta name="mobile-web-app-capable" content="yes" />
+    <title>NORTH</title>
+    <!-- No webfont: the app uses the platform's own UI font stack, the way
+         apple.com does (SF Pro on Apple devices, Segoe UI Variable on Windows). -->
   </head>
   <body>
     <div id="root"></div>
-    <script type="module" src="/src/main.jsx"></script>
+    <script type="module" src="/src/entry.jsx"></script>
   </body>
 </html>

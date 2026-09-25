@@ -1,7 +1,7 @@
 [package]
-name = "focusly-desktop"
+name = "north-desktop"
 version = "0.1.0"
-description = "Focusly desktop client — focus timer, tray, and (later) app tracking/blocking"
+description = "NORTH desktop client — focus timer, tray, and (later) app tracking/blocking"
 edition = "2021"
 
 [build-dependencies]
@@ -11,6 +11,12 @@ tauri-build = { version = "2", features = [] }
 tauri = { version = "2", features = ["tray-icon", "image-png"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+# Process enumeration + termination for app blocking. `sysinfo` is the portable
+# way to list processes and kill them on Windows/macOS/Linux; the API used here
+# (ProcessesToUpdate, OsStr process names, Pid::as_u32) is sysinfo 0.32+.
+sysinfo = "0.32"
+# Local wall-clock time, needed for schedule windows (std has no timezone).
+chrono = "0.4"
 
 [profile.release]
 codegen-units = 1

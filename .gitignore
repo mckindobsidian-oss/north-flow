@@ -17,6 +17,13 @@ web-build/
 Thumbs.db
 *.swp
 
+# Machine-local agent tooling. `.claude/skills/apple-design` is a symlink to an
+# absolute path inside this checkout, so committing it would bake a local
+# filesystem path into the repository and break for everyone else. The real
+# skill source is tracked at `.agents/skills/apple-design/`. Recreate the
+# symlink locally if your tooling wants it.
+.claude/
+
 # Secrets (never commit)
 .env
 .env.local

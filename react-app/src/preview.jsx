@@ -45,7 +45,7 @@ window.storage.set(
       { id: "a2", name: "YouTube", icon: "📺", limit: 60, used: 68, blocked: false, lastD: td },
       { id: "a3", name: "Games", icon: "🎮", limit: 30, used: 0, blocked: true, lastD: td },
     ],
-    friends: ["riya", "dev"],
+    friends: [], // fresh — Social shows clean empty states until real sync
     pm: { w: 25, sb: 5, lb: 15 },
   })
 );
@@ -68,9 +68,9 @@ window.storage.set("bd:demo", JSON.stringify([
     ],
   },
 ]));
+// Only the demo user's own entry exists — the Social tab starts "new, unused"
+// (no fake rivals). Real cross-device leaderboards arrive with Supabase.
 window.storage.set("lb:demo", JSON.stringify({ name: "Aarav", fm: 240, tc: 42, streak: 6, last: td }), true);
-window.storage.set("lb:riya", JSON.stringify({ name: "Riya", fm: 310, tc: 55, streak: 9, last: td }), true);
-window.storage.set("lb:dev", JSON.stringify({ name: "Dev", fm: 120, tc: 20, streak: 2, last: td }), true);
 
 // ── DEMO FOCUS HISTORY ────────────────────────────────────────────────────
 // Plausible recorded focus totals over the past ~75 days so the activity

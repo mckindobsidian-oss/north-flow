@@ -1,4 +1,4 @@
-# Focusly — preview run doc
+# NORTH — preview run doc
 
 The web app is `react-app/src/focusly.jsx` (React 19, token-based Apple
 theme, `lucide-react` icons). It talks to a host-provided `window.storage`
@@ -26,8 +26,40 @@ recreate them:
    webfont: the app uses the platform's own UI font stack (SF Pro on Apple
    devices, Segoe UI Variable on Windows).
 
-No env files are needed. Dependencies: `npm install` inside `react-app/`
-(installs React, lucide-react, Vite, oxlint).
+4. `react-app/.env.local` — holds the two **public** Supabase values
+   (`VITE_SUPABASE_URL`, `VITE_SUPABASE_ANON_KEY`). A fresh checkout ships them
+   as placeholders (`YOUR_SUPABASE_URL`); that is fine and the preview runs
+   normally, because `src/lib/supabase.js` only builds a client when the values
+   look real and otherwise reports "not configured" in the login screen instead
+   of throwing. Real values (from `SETUP.md`) are needed only for real
+   sign-in/sign-up. Never commit a real `service_role` key — see `SETUP.md`.
+
+Dependencies: `npm install` inside `react-app/` (React, lucide-react, Vite,
+oxlint, `@supabase/supabase-js`).
+
+## Backend
+
+`react-app/src/lib/sync.js` mirrors the app's `S.*` writes into the Supabase
+tables and pulls them back; `react-app/src/lib/sync-map.js` holds the pure
+app-shape ⇄ table-row mappers, so they are covered by `tests/sync.test.mjs`
+without a database or a browser. The preview harness has no Supabase session,
+so sync stays detached there and the demo account remains local — which is
+exactly the offline path a real device falls back to.
+
+## Shared modules (do this once, and after editing `packages/`)
+
+`react-app/src/shared/`, `apps/extension/lib/` and `apps/mobile/shared/` hold
+GENERATED copies of `packages/shared-types/blocking.js` and `account.js` — the
+blocking engine and account mapper every client runs. Regenerate with:
+
+```bash
+npm run sync:shared      # from the repo root
+npm run check:shared     # fails if a copy has drifted (npm test runs this too)
+```
+
+The extension needs its copy inside its own package and Vite/Metro each need
+one inside their own roots, which is why they are vendored rather than imported
+(see `scripts/sync-shared.mjs` for the whole rationale).
 
 ## Run the server
 
@@ -45,5 +77,19 @@ powershell -NoProfile -Command "(Start-Process -FilePath 'npm.cmd' -ArgumentList
 
 The app is served at `http://localhost:5174/preview.html` (pinned with
 `strictPort: true`). Sign out inside the app to see the login screen; the
-in-memory store resets on reload. The theme follows the OS — there is no
-manual toggle.
+in-memory store resets on reload. Default theme is **light**, with a visible
+sun/switch/moon control in the header (choice persists on the device).
+
+Two entries exist, and the difference matters:
+
+| Entry | Serves |
+|---|---|
+| `preview.html` → `src/preview.jsx` | the demo harness: installs the `window.storage` shim and seeds the "demo"/Aarav account (tasks, boards, ~75 days of focus history) |
+| `index.html` → `src/entry.jsx` | the real app: no seeding, no shim (`S.*` falls back to localStorage). This is what `npm run build` compiles, so the build verifies the actual product. |
+
+Verification commands (root): `npm test` (blocking engine + account mapper),
+`npm run lint`, `npm run build`. Design
+rules follow the installed `apple-design` skill (`.agents/skills/apple-
+design/SKILL.md`): fluid press feedback, scroll-edge frosted header (`.mtrl`),
+page arrival via `.pge`, and `prefers-reduced-motion` / `prefers-reduced-
+transparency` fallbacks in the injected `G()` stylesheet.

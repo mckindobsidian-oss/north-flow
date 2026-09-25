@@ -1,5 +1,5 @@
 /**
- * Focusly — shared domain types (JS mirror).
+ * NORTH — shared domain types (JS mirror).
  *
  * TypeScript consumers should use ./index.d.ts — the canonical contracts.
  * This file gives plain-JS consumers the same shapes as JSDoc typedefs plus

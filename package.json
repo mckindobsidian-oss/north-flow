@@ -1,11 +1,16 @@
 {
-  "name": "focusly",
+  "name": "north",
   "private": true,
-  "version": "0.1.0",
-  "description": "Focusly — an Apple-themed productivity ecosystem: web, browser extension, desktop and mobile clients sharing one account model.",
+  "version": "0.2.0",
+  "description": "NORTH — an Apple-themed productivity ecosystem: web, browser extension, desktop and mobile clients sharing one account model and one blocking engine.",
   "scripts": {
     "dev": "npm --prefix react-app run dev -- --config vite.preview.config.js",
+    "build": "npm --prefix react-app run build",
     "lint": "npm --prefix react-app run lint",
-    "preview": "npm --prefix react-app run preview"
+    "preview": "npm --prefix react-app run preview",
+    "sync:shared": "node scripts/sync-shared.mjs",
+    "check:shared": "node scripts/sync-shared.mjs --check",
+    "check:jsx": "node scripts/check-jsx.mjs",
+    "test": "node --test tests/*.test.mjs"
   }
 }

@@ -3,14 +3,14 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Focusly</title>
+  <title>NORTH</title>
   <style>
     :root { color-scheme: light dark; }
     * { box-sizing: border-box; }
     body {
-      width: 300px;
+      width: 320px;
       margin: 0;
-      padding: 14px;
+      padding: 12px;
       font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI Variable", "Segoe UI", Roboto, sans-serif;
       font-size: 13px;
       color: #1c1c1e;
@@ -19,55 +19,140 @@
     @media (prefers-color-scheme: dark) {
       body { color: #f2f2f7; background: #000; }
       .card { background: #1c1c1e; border-color: #38383a; }
-      input { background: #1c1c1e; border-color: #38383a; color: #f2f2f7; }
+      input, select { background: #1c1c1e; border-color: #38383a; color: #f2f2f7; }
       .chip { background: #1c1c1e; border-color: #38383a; color: #f2f2f7; }
       .muted { color: #98989e; }
     }
     h1 { font-size: 15px; margin: 0 0 10px; display: flex; align-items: center; gap: 6px; }
+    h1 .acct { margin-left: auto; font-size: 10px; font-weight: 600; color: #6d6d72; }
     .card { background: #fff; border: 1px solid #e2e3e9; border-radius: 12px; padding: 10px; margin-bottom: 10px; }
     .muted { color: #6d6d72; font-size: 11px; }
     .row { display: flex; gap: 6px; margin: 8px 0; }
+    .row:last-child { margin-bottom: 0; }
     .chip {
       flex: 1; border-radius: 8px; border: 1px solid #e2e3e9; background: #fff;
       padding: 6px 0; font-size: 12px; font-weight: 600; cursor: pointer; color: #1c1c1e;
     }
     .chip.primary { background: #007aff; border-color: #007aff; color: #fff; }
     .chip.stop { background: #ff3b30; border-color: #ff3b30; color: #fff; }
+    .chip.ghost { font-weight: 500; font-size: 11px; padding: 4px 8px; flex: 0 0 auto; }
     button:active { transform: scale(.96); }
-    input { width: 100%; border-radius: 8px; border: 1px solid #e2e3e9; padding: 6px 8px; font-size: 12px; outline: none; }
-    input:focus { border-color: #007aff; }
+    button:disabled { opacity: .5; cursor: default; }
+    input, select { border-radius: 8px; border: 1px solid #e2e3e9; padding: 6px 8px; font-size: 12px; outline: none; width: 100%; }
+    input:focus, select:focus { border-color: #007aff; }
     ul { list-style: none; margin: 6px 0 0; padding: 0; }
-    li { display: flex; justify-content: space-between; align-items: center; padding: 4px 0; }
-    .x { border: 0; background: none; color: #999; cursor: pointer; font-size: 14px; padding: 0 2px; }
+    li { display: flex; justify-content: space-between; align-items: center; gap: 6px; padding: 5px 0; }
+    li + li { border-top: 1px solid #e2e3e9; }
+    @media (prefers-color-scheme: dark) { li + li { border-top-color: #38383a; } }
+    .grow { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .sec { font-weight: 600; margin-bottom: 6px; display: flex; align-items: center; gap: 6px; }
+    .sec .spacer { margin-left: auto; }
+    .tag { font-size: 9px; font-weight: 700; padding: 1px 5px; border-radius: 10px; flex: 0 0 auto; }
+    .tag.on { color: #ff3b30; background: #ff3b3020; }
+    .tag.off { color: #ff9500; background: #ff950020; }
+    .tag.ok { color: #34c759; background: #34c75920; }
+    .x { border: 0; background: none; color: #999; cursor: pointer; font-size: 13px; padding: 0 2px; flex: 0 0 auto; }
+    .status-head { display: flex; gap: 8px; align-items: flex-start; }
+    .status-ico { font-size: 17px; line-height: 1; }
+    .days { display: flex; gap: 3px; margin: 8px 0; }
+    .days button {
+      flex: 1; border-radius: 7px; border: 1px solid #e2e3e9; background: #fff;
+      font-size: 10px; padding: 4px 0; cursor: pointer; color: #1c1c1e;
+    }
+    .days button[aria-pressed="true"] { background: #007aff; border-color: #007aff; color: #fff; }
+    @media (prefers-color-scheme: dark) { .days button { background: #1c1c1e; border-color: #38383a; color: #f2f2f7; } }
+    .err { color: #ff3b30; font-size: 11px; margin-top: 6px; }
+    .hide { display: none !important; }
   </style>
 </head>
 <body>
-  <h1>⚡ Focusly</h1>
+  <h1>🧭 NORTH <span class="acct" id="acctLabel">this device</span></h1>
 
+  <!-- What is enforced right now, from the shared engine -->
   <div class="card">
-    <div class="muted" id="focusLabel">No active focus session</div>
+    <div class="status-head">
+      <span class="status-ico" id="statusIcon">🕊</span>
+      <div class="grow">
+        <div style="font-weight: 600" id="statusHeadline">Loading…</div>
+        <div class="muted" id="statusDetail"></div>
+        <div class="muted" id="statusFocus" style="color:#007aff"></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Focus session -->
+  <div class="card">
+    <div class="sec">Focus session</div>
+    <div class="muted" id="focusLabel">No active session</div>
     <div class="row" id="focusRow">
       <button class="chip" data-min="25">25m</button>
       <button class="chip" data-min="50">50m</button>
       <button class="chip" data-min="90">90m</button>
     </div>
-    <button class="chip stop" id="stopBtn" hidden>End session</button>
+    <button class="chip stop hide" id="stopBtn">End session</button>
   </div>
 
+  <!-- Websites (enforced here, for real) -->
   <div class="card">
-    <div style="font-weight: 600; margin-bottom: 6px">Blocked sites</div>
+    <div class="sec">Websites <span class="spacer"></span><span class="muted">enforced here</span></div>
     <div class="row">
       <input id="siteInput" placeholder="youtube.com" />
-      <button class="chip primary" id="addBtn" style="flex: 0 0 auto; padding: 6px 12px">Add</button>
+      <button class="chip primary" id="addBtn" style="flex:0 0 auto;padding:6px 12px">Add</button>
     </div>
+    <div class="err hide" id="siteErr"></div>
     <ul id="siteList"></ul>
   </div>
 
+  <!-- Schedules (drive the same rules) -->
   <div class="card">
-    <div style="font-weight: 600; margin-bottom: 6px">Today's browsing</div>
-    <ul id="usageList"><li class="muted">No data yet</li></ul>
+    <div class="sec">Schedules <span class="spacer"></span>
+      <button class="x" id="schedToggle" aria-label="Add a schedule">+</button>
+    </div>
+    <div id="schedForm" class="hide">
+      <input id="schedName" placeholder="Work hours" />
+      <div class="days" id="schedDays"></div>
+      <div class="row">
+        <input type="time" id="schedStart" value="09:00" />
+        <input type="time" id="schedEnd" value="17:00" />
+      </div>
+      <div class="row">
+        <button class="chip" id="schedCancel">Cancel</button>
+        <button class="chip primary" id="schedAdd">Add</button>
+      </div>
+      <div class="err hide" id="schedErr"></div>
+    </div>
+    <ul id="schedList"></ul>
+    <div class="muted" style="margin-top:6px">Point a website at a schedule in the web app.</div>
   </div>
 
-  <script src="popup.js"></script>
+  <!-- Applications: configured here, enforced elsewhere -->
+  <div class="card">
+    <div class="sec">Applications <span class="spacer"></span><span class="muted">desktop app</span></div>
+    <ul id="appRuleList"></ul>
+    <div class="muted" id="appRuleNote" style="margin-top:6px"></div>
+  </div>
+
+  <!-- Usage -->
+  <div class="card">
+    <div class="sec">Today's browsing <span class="spacer"></span><span class="muted">private, local</span></div>
+    <ul id="usageList"></ul>
+  </div>
+
+  <!-- Account link (identity only until the Supabase phase) -->
+  <div class="card">
+    <div class="sec">Account</div>
+    <div id="acctForm" class="row hide">
+      <input id="acctInput" placeholder="username from the web app" />
+      <button class="chip primary" id="acctSave" style="flex:0 0 auto;padding:6px 10px">Link</button>
+    </div>
+    <div id="acctLinked">
+      <div class="muted" id="acctNote"></div>
+      <div class="row">
+        <button class="chip ghost" id="acctUnlink">Unlink</button>
+      </div>
+    </div>
+  </div>
+
+  <script type="module" src="popup.js"></script>
 </body>
 </html>
