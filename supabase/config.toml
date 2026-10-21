@@ -1,0 +1,53 @@
+# ══════════════════════════════════════════════════════════════════════════
+# NORTH — Supabase CLI configuration.
+#
+# `project_id` is the project REF (a public identifier — it is already visible
+# in the client's VITE_SUPABASE_URL and in every function URL). It is not a
+# credential: the CLI still needs `supabase login` (or SUPABASE_ACCESS_TOKEN),
+# and the database password stays out of this file.
+#
+# WHY verify_jwt = false FOR google-calendar
+#   Edge Functions verify a JWT at the gateway BEFORE the function runs. Two
+#   of this function's legs are browser redirects that physically cannot send
+#   an Authorization header:
+#     · ?action=start     — the app navigates to it (window.location.assign)
+#     · ?action=callback  — GOOGLE redirects the user's browser to it
+#   With verification on, both die with a platform 401 and connecting is
+#   impossible; the callback shows a raw 401 page instead of bouncing back to
+#   the app with ?gcal=error.
+#
+#   The function does its own authorization, so nothing is left open:
+#     · `start` verifies the caller's Supabase JWT itself (header OR the `jwt`
+#       query param, since a navigation can't set headers) and binds only that
+#       verified user id into a signed OAuth `state`;
+#     · `callback` trusts only that HMAC-signed, expiring state — never a URL
+#       parameter — so a forged or stale state fails closed;
+#     · every other action (`events`, `status`, `disconnect`) still requires
+#       the caller's JWT and only ever touches that caller's own row.
+#
+#   config.toml is the supported way to set this for a DEPLOYED function.
+#   (`--no-verify-jwt` is documented for local `functions serve`, and is
+#   reported unreliable for deploy — see supabase/cli#4059 — so the setting
+#   lives here instead, where it also survives every future redeploy.)
+#
+# WHY verify_jwt = false FOR spotify (identical reasoning, observed live):
+#   Deployed with the default verify_jwt = true, `?action=start` answers
+#   UNAUTHORIZED_NO_AUTH_HEADER even with ?jwt= present — the browser
+#   navigation cannot set an Authorization header, and the gateway rejects
+#   the request before the function's own verification runs. `?action=callback`
+#   (Spotify's redirect) would die the same way. The function authorizes
+#   every leg itself, so disabling gateway verification leaves nothing open.
+# ══════════════════════════════════════════════════════════════════════════
+
+project_id = "qrytzsgcarzpevgelwya"
+
+[functions.google-calendar]
+# Browser OAuth legs (start/callback) cannot carry a JWT — the function
+# authorizes them itself. Everything else still requires a caller JWT.
+verify_jwt = false
+
+[functions.spotify]
+# Same browser-OAuth legs (start = window.location.assign, callback =
+# Spotify's redirect) — gateway JWT verification would kill both with
+# UNAUTHORIZED_NO_AUTH_HEADER before the function's own auth runs.
+verify_jwt = false

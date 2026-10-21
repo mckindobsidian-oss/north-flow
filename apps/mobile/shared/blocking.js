@@ -30,6 +30,7 @@
  *   rules: [
  *     { id, kind: "website" | "app", target, label, enabled,
  *       when: "always" | "focus" | "scheduled", scheduleIds: string[], createdAt }
+ *   ], usageLimits: [{ id, kind: "website"|"app", target, mode: "daily"|"session", dailyLimitMinutes?, name, enabled }],
  *   ],
  *   schedules: [
  *     { id, name, days: number[], start: "HH:MM", end: "HH:MM", enabled }
@@ -154,6 +155,7 @@ export function defaultBlocking() {
   return {
     version: BLOCKING_VERSION,
     rules: [],
+    usageLimits: [],
     schedules: [],
     settings: defaultSettings(),
     unblocks: {},
@@ -194,6 +196,21 @@ export function normalizeState(state) {
       enabled: s?.enabled !== false,
     }))
     .filter((s) => s.days.length > 0);
+  const usageLimits = (Array.isArray(base.usageLimits) ? base.usageLimits : [])
+    .map((limit) => {
+      const minutes = Number(limit?.dailyLimitMinutes);
+      const kind = limit?.kind === "app" ? "app" : "website";
+      const target = kind === "app" ? normalizeApp(limit?.target) : normalizeHost(limit?.target);
+      const mode = limit?.mode === "session" ? "session" : "daily";
+      if (!target || (mode === "session" && kind !== "website") || (mode === "daily" && (!Number.isInteger(minutes) || minutes < 1))) return null;
+      return {
+        id: limit?.id || newId("l"), kind, target, mode,
+        ...(mode === "daily" ? { dailyLimitMinutes: Math.min(1440, minutes) } : {}),
+        name: typeof limit?.name === "string" ? limit.name.trim().slice(0, 60) : "",
+        enabled: limit?.enabled !== false,
+      };
+    })
+    .filter(Boolean);
   const unblocks = {};
   for (const [k, v] of Object.entries(base.unblocks || {})) {
     if (typeof v === "number") unblocks[k] = v;
@@ -207,7 +224,7 @@ export function normalizeState(state) {
           endAt: Number(rawFocus.endAt),
         }
       : null;
-  return { version: BLOCKING_VERSION, rules, schedules, settings, unblocks, focus };
+  return { version: BLOCKING_VERSION, rules, schedules, usageLimits, settings, unblocks, focus };
 }
 
 /**
@@ -309,7 +326,7 @@ export function isTemporarilyUnblocked(state, ruleId, now = Date.now()) {
  * it is an explicit user action with an expiry — after the expiry the same
  * rule re-applies with no extra bookkeeping.
  */
-export function evaluateBlocking(state, now = Date.now()) {
+export function evaluateBlocking(state, now = Date.now(), usageSecondsByHost = {}, usageSecondsByApp = {}) {
   const s = normalizeState(state);
   const running = activeSchedules(s, now);
   const focusOn = s.settings.blockDuringFocus && focusActive(s.focus, now);
@@ -351,6 +368,34 @@ export function evaluateBlocking(state, now = Date.now()) {
     else apps.push(rule.target);
   }
 
+  for (const limit of s.usageLimits) {
+    if (!limit.enabled || limit.mode === "session") continue; // session allowances are tab-scoped and enforced by the extension.
+    if (limit.kind === "app") {
+      const used = Object.entries(usageSecondsByApp || {}).reduce((total, [name, seconds]) =>
+        total + (appKey(name) === appKey(limit.target) ? Math.max(0, Number(seconds) || 0) : 0), 0);
+      if (used < limit.dailyLimitMinutes * 60) continue;
+      if (isTemporarilyUnblocked(s, limit.id, now)) {
+        reasons[limit.id] = { reason: "temp-unblock", until: s.unblocks[limit.id], target: limit.target, kind: "app" };
+        continue;
+      }
+      reasons[limit.id] = { reason: "daily-limit", target: limit.target, kind: "app" };
+      apps.push(limit.target);
+      continue;
+    }
+    const used = Object.entries(usageSecondsByHost || {}).reduce((total, [host, seconds]) => {
+      const domain = normalizeHost(host);
+      return total + (domain && (domain === limit.target || domain.endsWith(`.${limit.target}`))
+        ? Math.max(0, Number(seconds) || 0) : 0);
+    }, 0);
+    if (used < limit.dailyLimitMinutes * 60) continue;
+    if (isTemporarilyUnblocked(s, limit.id, now)) {
+      reasons[limit.id] = { reason: "temp-unblock", until: s.unblocks[limit.id], target: limit.target, kind: "website" };
+      continue;
+    }
+    reasons[limit.id] = { reason: "daily-limit", target: limit.target, kind: "website" };
+    websites.push(limit.target);
+  }
+
   return {
     active: websites.length > 0 || apps.length > 0,
     websites: [...new Set(websites)],
@@ -383,6 +428,29 @@ export function removeRule(state, ruleId) {
   const unblocks = { ...s.unblocks };
   delete unblocks[ruleId];
   return { ...s, rules: s.rules.filter((r) => r.id !== ruleId), unblocks };
+}
+
+export function upsertUsageLimit(state, limit) {
+  const s = normalizeState(state);
+  const kind = limit?.kind === "app" ? "app" : "website";
+  const target = kind === "app" ? normalizeApp(limit?.target) : normalizeHost(limit?.target);
+  const mode = limit?.mode === "session" && kind === "website" ? "session" : "daily";
+  const minutes = Number(limit?.dailyLimitMinutes);
+  if (!target || (mode === "daily" && (!Number.isInteger(minutes) || minutes < 1))) return s;
+  const next = {
+    id: limit.id || newId("l"), kind, target, mode,
+    ...(mode === "daily" ? { dailyLimitMinutes: Math.min(1440, minutes) } : {}),
+    name: typeof limit.name === "string" ? limit.name.trim().slice(0, 60) : "",
+    enabled: limit.enabled !== false,
+  };
+  return normalizeState({ ...s, usageLimits: [...s.usageLimits.filter((item) => item.id !== next.id), next] });
+}
+
+export function removeUsageLimit(state, limitId) {
+  const s = normalizeState(state);
+  const unblocks = { ...s.unblocks };
+  delete unblocks[limitId];
+  return { ...s, usageLimits: s.usageLimits.filter((limit) => limit.id !== limitId), unblocks };
 }
 
 export function setRuleEnabled(state, ruleId, enabled) {
@@ -451,16 +519,18 @@ export function migrateLegacy({ blockedSites = [], trackedApps = [], blockedApps
 
 // ── status text shared by every client's UI ───────────────────────────────
 /** One-line, honest status: what is blocked right now and what happens next. */
-export function describeBlocking(state, now = Date.now()) {
+export function describeBlocking(state, now = Date.now(), usageSecondsByHost = {}) {
   const s = normalizeState(state);
-  const v = evaluateBlocking(s, now);
-  const configured = s.rules.filter((r) => r.enabled).length;
+  const v = evaluateBlocking(s, now, usageSecondsByHost);
+  const configured = s.rules.filter((r) => r.enabled).length + s.usageLimits.filter((limit) => limit.enabled).length;
 
   if (v.active) {
     const bits = [];
     if (v.websites.length) bits.push(`${v.websites.length} site${v.websites.length === 1 ? "" : "s"}`);
     if (v.apps.length) bits.push(`${v.apps.length} app${v.apps.length === 1 ? "" : "s"}`);
-    const why = v.focus.active ? "focus session" : v.schedules.length ? v.schedules.map((x) => x.name).join(", ") : "always-on rules";
+    const why = Object.values(v.reasons).some((reason) => reason.reason === "daily-limit")
+      ? "daily time limits"
+      : v.focus.active ? "focus session" : v.schedules.length ? v.schedules.map((x) => x.name).join(", ") : "always-on rules";
     return { active: true, headline: `Blocking ${bits.join(" and ")}`, detail: `Because of ${why}` };
   }
   if (v.focus.active) {
@@ -470,7 +540,9 @@ export function describeBlocking(state, now = Date.now()) {
   return {
     active: false,
     headline: configured ? "Nothing blocked right now" : "Nothing to block yet",
-    detail: next ? `Next schedule starts ${next}` : configured ? "Your rules are waiting for their window" : "Add a site or app to start",
+    detail: s.usageLimits.length
+      ? "Daily limits are enforced by the browser extension"
+      : next ? `Next schedule starts ${next}` : configured ? "Your rules are waiting for their window" : "Add a site or app to start",
   };
 }
 

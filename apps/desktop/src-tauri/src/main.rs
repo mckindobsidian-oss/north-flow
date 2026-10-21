@@ -7,6 +7,8 @@
 //    processes whose rules are active (always-on, during a focus session, or
 //    inside a schedule window).
 //  - Focus sessions with a wall-clock deadline, mirrored in the tray tooltip.
+//  - Windows foreground-app usage sampling while signed into a North account;
+//    executable names and durations only, stored by account and UTC day.
 //  - Temporary unblocks with an expiry, exactly like the other clients.
 //
 // WHAT THIS CANNOT DO (documented, not faked)
@@ -69,6 +71,25 @@ struct Schedule {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+struct UsageLimit {
+    id: String,
+    #[serde(default = "default_limit_kind")]
+    kind: String,
+    target: String,
+    #[serde(default = "default_limit_mode")]
+    mode: String,
+    #[serde(default)]
+    daily_limit_minutes: u32,
+    #[serde(default)]
+    enabled: bool,
+}
+
+fn default_limit_kind() -> String { "website".into() }
+fn default_limit_mode() -> String { "daily".into() }
+type Usage = HashMap<String, HashMap<String, HashMap<String, u64>>>;
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct Settings {
     block_during_focus: bool,
     allow_temporary_unblock: bool,
@@ -98,6 +119,8 @@ struct BlockingState {
     #[serde(default)]
     schedules: Vec<Schedule>,
     #[serde(default)]
+    usage_limits: Vec<UsageLimit>,
+    #[serde(default)]
     settings: Settings,
     #[serde(default)]
     unblocks: HashMap<String, u64>,
@@ -114,6 +137,7 @@ impl Default for BlockingState {
             version: 2,
             rules: Vec::new(),
             schedules: Vec::new(),
+            usage_limits: Vec::new(),
             settings: Settings::default(),
             unblocks: HashMap::new(),
             focus: None,
@@ -157,7 +181,10 @@ struct Status {
 struct AppState {
     blocking: Mutex<BlockingState>,
     events: Mutex<Vec<EnforcementEvent>>,
+    usage: Mutex<Usage>,
+    usage_owner: Mutex<Option<String>>,
     path: PathBuf,
+    usage_path: PathBuf,
 }
 
 type R<T> = Result<T, String>;
@@ -171,6 +198,83 @@ const PROTECTED: &[&str] = &[
     "launchd", "kernel_task", "windowserver", "loginwindow", "finder", "dock", "systemd",
     "init", "gnome-shell", "kwin", "plasmashell", "xorg", "wayland", "north-desktop",
 ];
+
+const BROWSERS: &[&str] = &["brave", "brave-browser", "chrome", "chromium", "edge", "msedge", "firefox", "google-chrome", "opera", "vivaldi"];
+
+fn utc_day(ms: u64) -> String {
+    chrono::DateTime::from_timestamp_millis(ms.min(i64::MAX as u64) as i64)
+        .unwrap_or_else(chrono::Utc::now).format("%Y-%m-%d").to_string()
+}
+
+fn load_usage(path: &PathBuf) -> Usage {
+    fs::read(path).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default()
+}
+
+fn save_usage(state: &AppState) {
+    if let Some(data) = state.usage.lock().ok().and_then(|usage| serde_json::to_vec(&*usage).ok()) {
+        let _ = fs::write(&state.usage_path, data);
+    }
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct UsageRow { day: String, name: String, seconds: u64 }
+
+fn foreground_app() -> Option<String> {
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::ffi::OsStringExt;
+        use std::ffi::OsString;
+        #[repr(C)] struct LastInputInfo { size: u32, tick: u32 }
+        #[link(name = "user32")] extern "system" {
+            fn GetForegroundWindow() -> isize;
+            fn GetWindowThreadProcessId(hwnd: isize, pid: *mut u32) -> u32;
+            fn GetLastInputInfo(info: *mut LastInputInfo) -> i32;
+        }
+        #[link(name = "kernel32")] extern "system" {
+            fn OpenProcess(access: u32, inherit: i32, pid: u32) -> isize;
+            fn QueryFullProcessImageNameW(process: isize, flags: u32, name: *mut u16, size: *mut u32) -> i32;
+            fn CloseHandle(handle: isize) -> i32;
+            fn GetTickCount() -> u32;
+        }
+        unsafe {
+            let mut input = LastInputInfo { size: std::mem::size_of::<LastInputInfo>() as u32, tick: 0 };
+            if GetLastInputInfo(&mut input) == 0 || GetTickCount().wrapping_sub(input.tick) > 60_000 { return None; }
+            let hwnd = GetForegroundWindow();
+            if hwnd == 0 { return None; }
+            let mut pid = 0;
+            GetWindowThreadProcessId(hwnd, &mut pid);
+            if pid == 0 { return None; }
+            let handle = OpenProcess(0x1000, 0, pid);
+            if handle == 0 { return None; }
+            let mut buf = [0u16; 1024];
+            let mut len = buf.len() as u32;
+            let ok = QueryFullProcessImageNameW(handle, 0, buf.as_mut_ptr(), &mut len);
+            CloseHandle(handle);
+            if ok == 0 { return None; }
+            let full = OsString::from_wide(&buf[..len as usize]).to_string_lossy().to_string();
+            let name = std::path::Path::new(&full).file_stem()?.to_string_lossy().trim().to_string();
+            if name.is_empty() || is_protected(&name) || BROWSERS.iter().any(|b| b.eq_ignore_ascii_case(&name)) { return None; }
+            Some(name)
+        }
+    }
+    #[cfg(not(target_os = "windows"))]
+    { None }
+}
+
+fn sample_foreground_usage(state: &AppState) {
+    if let (Some(owner), Some(name)) = (state.usage_owner.lock().unwrap().clone(), foreground_app()) {
+        let day = utc_day(now_ms());
+        let cutoff = utc_day(now_ms().saturating_sub(90 * 86_400_000));
+        let mut usage = state.usage.lock().unwrap();
+        let days = usage.entry(owner).or_default();
+        days.retain(|date, _| date >= &cutoff);
+        let seconds = days.entry(day).or_default().entry(name).or_default();
+        *seconds += 5;
+        drop(usage);
+        save_usage(state);
+    }
+}
 
 fn now_ms() -> u64 {
     SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0)
@@ -254,7 +358,7 @@ fn focus_active(state: &BlockingState, now_ms: u64) -> bool {
 
 /// Which application rules are active right now, and why. Mirrors
 /// `evaluateBlocking` for the app half of the model.
-fn active_app_rules(state: &BlockingState) -> Vec<(Rule, String)> {
+fn active_app_rules(state: &BlockingState, usage: &Usage, owner: Option<&str>) -> Vec<(Rule, String)> {
     let now_ms = now_ms();
     let today = Local::now();
     let running = active_schedules(state, today);
@@ -290,6 +394,24 @@ fn active_app_rules(state: &BlockingState) -> Vec<(Rule, String)> {
             continue;
         }
         out.push((rule.clone(), reason));
+    }
+    if let Some(today_usage) = owner
+        .and_then(|id| usage.get(id))
+        .and_then(|days| days.get(&utc_day(now_ms())))
+    {
+        for limit in state.usage_limits.iter().filter(|limit| limit.enabled && limit.kind == "app" && limit.mode == "daily" && limit.daily_limit_minutes > 0) {
+            let used: u64 = today_usage.iter()
+                .filter(|(name, _)| app_key(name) == app_key(&limit.target))
+                .map(|(_, seconds)| *seconds)
+                .sum();
+            if used < u64::from(limit.daily_limit_minutes) * 60
+                || state.unblocks.get(&limit.id).map(|until| *until > now_ms()).unwrap_or(false)
+            { continue; }
+            out.push((Rule {
+                id: limit.id.clone(), kind: "app".into(), target: limit.target.clone(), label: limit.target.clone(),
+                enabled: true, when: "always".into(), schedule_ids: Vec::new(),
+            }, "daily usage limit".into()));
+        }
     }
     out
 }
@@ -333,8 +455,10 @@ fn snapshot_processes() -> Vec<AppInfo> {
 /// End every live process that matches an active app rule.
 fn enforce(state: &Arc<AppState>) -> usize {
     let active: Vec<(Rule, String)> = {
+        let owner = state.usage_owner.lock().unwrap().clone();
+        let usage = state.usage.lock().unwrap();
         let guard = state.blocking.lock().unwrap();
-        active_app_rules(&guard)
+        active_app_rules(&guard, &usage, owner.as_deref())
     };
     if active.is_empty() {
         return 0;
@@ -384,6 +508,26 @@ fn enforce(state: &Arc<AppState>) -> usize {
 #[tauri::command]
 fn get_state(state: Ctx<'_>) -> BlockingState {
     state.blocking.lock().unwrap().clone()
+}
+
+#[tauri::command]
+fn apply_account_blocking(
+    state: Ctx<'_>, rules: Vec<Rule>, schedules: Vec<Schedule>, usage_limits: Vec<UsageLimit>,
+    settings: Settings, focus: Option<Focus>,
+) -> R<()> {
+    let mut guard = state.blocking.lock().unwrap();
+    guard.rules.retain(|rule| rule.kind != "app");
+    guard.rules.extend(rules.into_iter().filter(|rule| rule.kind == "app" && !normalize_app(&rule.target).is_empty()));
+    guard.schedules = schedules;
+    guard.usage_limits = usage_limits;
+    guard.settings = settings;
+    guard.focus = focus.filter(|f| f.end_at > now_ms());
+    let active_ids: std::collections::HashSet<String> = guard.rules.iter().map(|rule| rule.id.clone())
+        .chain(guard.usage_limits.iter().map(|limit| limit.id.clone())).collect();
+    guard.unblocks.retain(|id, _| active_ids.contains(id));
+    let next = guard.clone();
+    drop(guard);
+    persist(&state, &next)
 }
 
 #[tauri::command]
@@ -525,8 +669,10 @@ fn remove_schedule(state: Ctx<'_>, id: String) -> R<()> {
 
 #[tauri::command]
 fn list_running_apps(state: Ctx<'_>) -> Status {
+    let usage_owner = state.usage_owner.lock().unwrap().clone();
+    let usage = state.usage.lock().unwrap();
     let guard = state.blocking.lock().unwrap();
-    let active = active_app_rules(&guard);
+    let active = active_app_rules(&guard, &usage, usage_owner.as_deref());
     let now = Local::now();
     let running: Vec<String> = active_schedules(&guard, now).iter().map(|s| s.name.clone()).collect();
     let focus = focus_active(&guard, now_ms());
@@ -549,6 +695,27 @@ fn list_running_apps(state: Ctx<'_>) -> Status {
 #[tauri::command]
 fn enforcement_log(state: Ctx<'_>) -> Vec<EnforcementEvent> {
     state.events.lock().unwrap().clone()
+}
+
+#[tauri::command]
+#[tauri::command]
+fn set_usage_owner(state: Ctx<'_>, owner: Option<String>) {
+    *state.usage_owner.lock().unwrap() = owner;
+}
+
+#[tauri::command]
+fn desktop_usage(state: Ctx<'_>, owner: String) -> Vec<UsageRow> {
+    if state.usage_owner.lock().unwrap().as_deref() != Some(owner.as_str()) { return Vec::new(); }
+    let usage = state.usage.lock().unwrap();
+    let mut rows = Vec::new();
+    if let Some(days) = usage.get(&owner) {
+        for (day, apps) in days {
+            for (name, seconds) in apps {
+                rows.push(UsageRow { day: day.clone(), name: name.clone(), seconds: *seconds });
+            }
+        }
+    }
+    rows
 }
 
 #[tauri::command]
@@ -619,12 +786,23 @@ fn main() {
                 .unwrap_or_else(|_| PathBuf::from("."));
             let _ = fs::create_dir_all(&dir);
             let path = dir.join("north-blocking.json");
+            let usage_path = dir.join("north-usage.json");
             let state = Arc::new(AppState {
                 blocking: Mutex::new(load(&path)),
                 events: Mutex::new(Vec::new()),
+                usage: Mutex::new(load_usage(&usage_path)),
                 path,
+                usage_path,
             });
             app.manage(state.clone());
+            #[cfg(target_os = "windows")]
+            {
+                let usage_state = app.state::<Arc<AppState>>().inner().clone();
+                std::thread::spawn(move || loop {
+                    std::thread::sleep(Duration::from_secs(5));
+                    sample_foreground_usage(&usage_state);
+                });
+            }
 
             // Enforcement loop. 3s is a deliberate compromise: fast enough that
             // a distraction does not survive long, slow enough that scanning
@@ -662,6 +840,7 @@ fn main() {
         })
         .invoke_handler(tauri::generate_handler![
             get_state,
+            apply_account_blocking,
             get_focus_state,
             start_focus,
             cancel_focus,
@@ -675,6 +854,8 @@ fn main() {
             remove_schedule,
             list_running_apps,
             enforcement_log,
+            desktop_usage,
+            set_usage_owner,
             link_account
         ])
         .run(tauri::generate_context!())

@@ -2,8 +2,8 @@
 -- NORTH — security hardening (run once, in the Supabase SQL editor).
 --
 -- Companion to supabase/schema.sql. That file creates the tables and their
--- policies; this one closes the two grant-level gaps that were found by probing
--- the live project with the public anon key. Idempotent — re-running is safe.
+-- policies; this one closes grant and function-search-path gaps confirmed on
+-- the live project. Idempotent — re-running is safe.
 --
 -- WHY A SEPARATE FILE
 -- schema.sql is already applied to the live database. Appending to it would
@@ -25,20 +25,18 @@ begin;
 revoke execute on function public.current_streak(uuid) from anon, public;
 grant  execute on function public.current_streak(uuid) to authenticated, service_role;
 
--- ── 2. trigger functions and slug_username: verified safe, NOT revoked ────
--- Every function in the public schema was probed with the anon key. Results:
+-- ── 2. trigger functions and slug_username ───────────────────────────────
+-- The original API probe saw these zero-argument trigger functions return
+-- PGRST202. A current Supabase security-advisor and ACL inspection instead
+-- report them as callable SECURITY DEFINER functions. Revoke client execution;
+-- their database triggers still invoke them normally.
 --
 --   leaderboard(integer)    401 42501 permission denied   -> correctly revoked
 --   current_streak(uuid)    200 "0"                      -> FIXED BY SECTION 1
 --   slug_username(text)     200 "abc.de"                 -> harmless, see below
---   handle_new_user()       404 PGRST202                  -> not reachable (a)
---   sync_daily_focus()      404 PGRST202                  -> not reachable (a)
---   touch_updated_at()      404 PGRST202                  -> not reachable (a)
---
--- (a) The three trigger functions are not merely unexploitable by nature —
---     PostgREST cannot resolve them as callable endpoints at all. They take no
---     arguments, so /rpc/<name> matches no signature and returns 404. Nothing
---     to revoke.
+--   handle_new_user()       EXECUTE granted to PUBLIC/anon/auth -> FIXED below
+--   sync_daily_focus()      EXECUTE granted to PUBLIC/anon/auth -> FIXED below
+--   touch_updated_at()      no client RPC use; remains unchanged
 --
 -- slug_username(text) IS reachable by anon and returns its input slugged. It is
 -- an IMMUTABLE pure string function that reads no table, so it discloses
@@ -49,6 +47,14 @@ grant  execute on function public.current_streak(uuid) to authenticated, service
 -- most important write in the system.
 --
 -- Recorded so the next person does not have to re-derive it.
+revoke execute on function public.handle_new_user() from public, anon, authenticated;
+revoke execute on function public.sync_daily_focus() from public, anon, authenticated;
+
+-- Pin the built-in catalog before public objects in each function's lookup
+-- path. This keeps unqualified builtin calls from resolving to public objects.
+alter function public.current_streak(uuid) set search_path = pg_catalog, public;
+alter function public.slug_username(text) set search_path = pg_catalog, public;
+alter function public.touch_updated_at() set search_path = pg_catalog, public;
 
 -- ── 3. confirm the result ────────────────────────────────────────────────
 -- Both columns must read `false`. If either is true, the revoke above did not

@@ -14,8 +14,8 @@ npm install                # installs @tauri-apps/cli (first run only)
 npm run tauri dev          # compiles the Rust core and opens the window
 ```
 
-> The window UI is prebuilt in `dist/` (plain HTML/CSS/JS, no build step).
-> `npm run dev`/`build` exist for when the frontend grows its own tooling.
+> The desktop UI is its own frontend in `dist/` (plain HTML/CSS/JS). It talks
+> to the Rust core for native process monitoring, usage sampling and blocking.
 >
 > ⚠️ **`cargo check` has not been run yet**: this file's Rust was written in an
 > environment without a Rust toolchain. Run `npm run tauri dev` (or
@@ -43,6 +43,12 @@ npm run tauri dev          # compiles the Rust core and opens the window
   implying success.
 - **A protected-process denylist** — shells, session managers and NORTH itself
   are never terminated, whatever a rule says.
+- **Foreground app usage (Windows)** — while signed into NORTH, a background
+  sampler records only the foreground executable name and active seconds (idle
+  after 60 seconds is excluded; browser processes are excluded to keep web and
+  desktop usage separate). It stores at most 90 days locally and upserts daily
+  totals into `usage_records` with the desktop account's own JWT. macOS/Linux
+  collection is not implemented; no window title or content is captured.
 - The page degrades gracefully in a plain browser (no `window.__TAURI__`) and
   says so, rather than appearing to block things.
 
@@ -62,7 +68,6 @@ npm run tauri dev          # compiles the Rust core and opens the window
 | Milestone | Capability | Approach |
 |---|---|---|
 | Next | Verified build | `cargo check` + a signed bundle on Windows/macOS |
-| Next | Usage tracking | Same `usage_records` shape the extension posts |
-| Later | Shared backend sync | Same Supabase account as web/extension/mobile (`supabase/schema.sql`) |
+| Next | macOS/Linux foreground usage | Platform-native foreground-process and idle-state adapters |
 | Later | Global shortcuts | `tauri-plugin-global-shortcut` |
 | Research | Launch prevention | Driver / MDM profile — documented as unsupported until then |

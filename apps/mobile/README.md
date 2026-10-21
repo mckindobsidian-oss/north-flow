@@ -48,8 +48,55 @@ npx expo start           # scan the QR code with Expo Go, or press a / i
 
   then put the read/write behind `Blocking`'s `useState` (a ~10-line change) and
   the focus timer's chime/notification behind `expo-notifications`.
-- **Account sign-in.** The next step after persistence; the shared
-  `account.js` mapper is already vendored here and ready for it.
+- **Account sign-in.** **IMPLEMENTED (email + password).**
+  `lib/supabase.js` + `lib/auth.js` + `AuthScreen.jsx` provide real sign-in,
+  sign-up (with the web app's confirmation flow), session restoration and
+  sign-out, reusing the same shared `account.js` mapper and the web client's
+  sync engine. Configure by setting `EXPO_PUBLIC_SUPABASE_URL` and
+  `EXPO_PUBLIC_SUPABASE_ANON_KEY` (both public values) before `npx expo start`
+  — e.g. in `.env.local` inside `apps/mobile/` (gitignored) or your shell.
+
+  **Persistence:** install the optional peer dependency so sessions and data
+  survive restarts — `npx expo install @react-native-async-storage/async-storage`.
+  Without it everything still works for the current app run (in-memory), and
+  the app says so honestly.
+
+  **Google on mobile:** not wired yet, deliberately. Expo requires either
+  `expo-auth-session` with a registered deep-link scheme + development build,
+  or `expo-web-browser` with a deep-link `redirectTo` allow-listed in the
+  Supabase dashboard. Both need native configuration that cannot be verified
+  from this environment, and a faked flow would be worse than none. The
+  email path is complete; Google is the documented next step.
+
+## Roadmap (nothing faked)
+
+## Bringing the phone into the account/sync architecture (Step 2 prep)
+
+The web client defines the pattern; the phone should copy it, not invent a
+parallel one. In dependency order:
+
+1. **Persistence first, sign-in second.** `@react-native-async-storage/async-storage`
+   is prerequisite to everything: without it there is nothing to sync into.
+   It slots under the same key scheme (`u:<un>`, `bd:<un>`, `fs:<un>:<date>`,
+   `sess`) so `lib/sync.js`'s push handlers work unchanged — that module only
+   requires a `store` with `get/set/list` and `localStorage`-shaped async
+   methods, which AsyncStorage satisfies directly. This is a thin adapter,
+   not a rewrite.
+2. **Add `@supabase/supabase-js` and reuse the account mapper.** Sign-in via
+   `auth.signInWithPassword` (email+password; the same provider the web app
+   uses — no OAuth setup needed on the Supabase side). `toAppUser` +
+   `hydrateProfile` from the vendored `shared/account.js` map the result
+   exactly as the web does; `un` is derived identically, so the same person
+   lands on the same profile key on both devices.
+3. **Then sync.** With `store` (AsyncStorage adapter) + a signed-in user,
+   `createSync({ store, client })` from `lib/sync.js` is a copy — no
+   modification. Its offline queue, debounce and last-write-wins semantics
+   are already covered by the web tests and the live RLS verification.
+
+Not done here on purpose: `expo-notifications` reminders (a separate native
+module decision), and app-limit enforcement (needs a custom dev build — see
+the roadmap). No fake sign-in UI is added: without the dependencies above,
+an auth screen would only pretend to work.
 
 ## Roadmap (nothing faked)
 

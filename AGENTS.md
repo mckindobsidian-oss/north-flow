@@ -1,40 +1,36 @@
-# AGENTS.md — guidance for AI agents working in this repo
+# NORTH — permanent agent instructions
 
-## Design system (apply on every UI change)
+`NORTH_MASTER_PLAN.md`, `ARCHITECTURE.md`, `DECISIONS.md`, `PROGRESS.md`, and `ROADMAP.md` are the durable source of truth for this repository. Read them, then inspect the relevant code before planning or changing a feature. When they conflict with older readmes, audits, or checklists, the newer decision in `DECISIONS.md` wins. Do not erase useful older documentation; correct or deprecate it in the source-of-truth documents.
 
-NORTH follows Apple's Human Interface Guidelines. Two skill sources live in
-this repo and BOTH should be loaded before any design feedback or restyle:
+## Product guardrails
 
-- `design-rules/apple-design-skill/` — vendored Apple HIG reference (color,
-  typography, layout, dark-mode, materials, motion, icons, …).
-- `.agents/skills/apple-design/SKILL.md` — installed via `npx skills add
-  https://github.com/emilkowalski/skills --skill apple-design` (tracked in
-  `skills-lock.json`). Focuses on fluid interaction: press physics, springs,
-  interruptible motion, scroll-edge translucent chrome, size-aware type
-  (tracking/leading), and `prefers-reduced-motion` / `prefers-reduced-
-  transparency` handling. Rules already live in the codebase: press feedback
-  on `.b:active`, `color-scheme` per theme, `backdrop-filter` frosted header
-  (`.mtrl`), page arrival via the `.pge` animation, and global reduced-motion
-  overrides in the injected `G()` stylesheet.
-- **Non-negotiable rules in use today**: system semantic colors (the `K`
-  token palettes), ≥4.5:1 contrast for text, no hard-coded hex outside the
-  token block, hairlines + grouped gray surfaces instead of heavy borders or
-  gradients, system-first font stack, content-aware motion only.
-- **Product decision**: unlike stock Apple apps, NORTH shows a manual
-  light/dark switch (user requirement). Default is **light**; the switch is
-  an iOS-style control with sun/moon affordance.
+- NORTH is a cross-platform productivity and focus ecosystem: web, browser extension, desktop, Android, iOS/iPadOS, and one shared account/cloud model.
+- Focus/Pomodoro is the primary experience. Tasks support it and must stay in sync where a client implements them.
+- **North Flow** is one shared rules, schedules, limits, and blocking model. The cloud model is shared; enforcement stays local to the platform that is technically able and authorized to enforce it. Never claim that configuration is enforcement.
+- The Board/kanban direction is deprecated. Do not add, promote, or plan Board work. Existing Board code and data need a deliberate migration/removal plan; do not silently delete user data.
+- Keep the product minimal, atmospheric, Apple-inspired, and focused. Avoid generic SaaS layouts, decorative card grids, nested containers, fake metrics, and functionality presented as real before it is verified.
 
-## Stack map (one product, many clients)
+## Truth, integrations, and security
 
-- `react-app/src/focusly.jsx` — the web client (single-file React app, inline
-  styles via the `K` token system). Data goes through the `S.*` storage layer.
-- `react-app/src/preview.jsx` — browser shim + demo seed (dev preview only).
-- `apps/extension/`, `apps/desktop/`, `apps/mobile/` — other clients; each
-  owns only the OS capabilities a web page cannot (see ARCHITECTURE.md).
-- `packages/shared-types/` — canonical data shapes.
+- Spotify, Google Calendar, authentication, social, sync, and blocking must use real integrations and real data. If a dependency, account, entitlement, deployment, or browser/native test is missing, show and document the honest unavailable state.
+- Never commit, document, print, or send credentials: passwords, API keys, OAuth secrets, access/refresh tokens, service-role keys, or database secrets. Use ignored environment files and platform secret configuration. Public client configuration is still handled through environment variables.
+- Inspect actual code before asserting status. Label work **Planned**, **Implemented**, **Verified**, **Blocked**, or **Deprecated**.
 
-## Build order (user's priority)
+## Working agreement
 
-1. **Website** (react-app) — currently in progress
-2. Desktop app → 3. Browser extension → 4. Mobile app
-Supabase/Google accounts come later; never fake them (see SETUP.md).
+1. Preserve unrelated uncommitted work. Check `git status` before edits.
+2. Prefer the existing shared model and the smallest correct change. Do not build parallel state or duplicate platform logic.
+3. For UI work, read `design-rules/apple-design-skill/SKILL.md` and the local Apple design skill before editing. Use the token system and accessibility / reduced-motion rules already established in the app.
+4. After meaningful changes, run the narrowest relevant checks, then broader checks when practical. Record what passed, failed, or could not be verified in `PROGRESS.md`.
+5. Update `DECISIONS.md` and `PROGRESS.md` whenever a substantial decision or implementation change is made, so a future session can continue from files rather than chat history.
+
+## Useful commands
+
+```bash
+npm run dev
+npm test
+npm run check:jsx
+npm run check:shared
+npm run build
+npm run lint
+```

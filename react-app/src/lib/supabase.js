@@ -2,7 +2,7 @@ import { createClient } from '@supabase/supabase-js';
 
 // Public (by design) values from react-app/.env.local — see SETUP.md.
 const supabaseUrl = import.meta.env.VITE_SUPABASE_URL;
-const supabaseAnonKey = import.meta.env.VITE_SUPABASE_ANON_KEY;
+export const supabaseAnonKey = import.meta.env.VITE_SUPABASE_ANON_KEY;
 
 // A fresh checkout ships .env.local with placeholders ("YOUR_SUPABASE_URL").
 // Missing OR placeholder values mean "no account service configured yet" —

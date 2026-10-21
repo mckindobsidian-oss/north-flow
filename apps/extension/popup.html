@@ -3,83 +3,171 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>NORTH</title>
+  <title>NORTH Flow | Browser extension</title>
   <style>
-    :root { color-scheme: light dark; }
+    :root { color-scheme: dark; --accent:#536ec8; --accent-glow:rgba(60,180,255,.32); }
     * { box-sizing: border-box; }
     body {
-      width: 320px;
+      width: 330px;
+      min-height: 100vh;
       margin: 0;
-      padding: 12px;
+      padding: 10px;
       font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI Variable", "Segoe UI", Roboto, sans-serif;
       font-size: 13px;
-      color: #1c1c1e;
-      background: #f2f2f7;
+      color: #fbfcff;
+      background: radial-gradient(ellipse at 12% 0%, var(--accent-glow), transparent 48%), linear-gradient(180deg,rgba(6,9,15,.58),rgba(6,9,15,.76)), var(--wallpaper, linear-gradient(155deg,#263451,#656783 52%,#385d70));
+      background-size: cover;
+      background-position: center;
+      background-attachment: fixed;
     }
-    @media (prefers-color-scheme: dark) {
-      body { color: #f2f2f7; background: #000; }
-      .card { background: #1c1c1e; border-color: #38383a; }
-      input, select { background: #1c1c1e; border-color: #38383a; color: #f2f2f7; }
-      .chip { background: #1c1c1e; border-color: #38383a; color: #f2f2f7; }
-      .muted { color: #98989e; }
-    }
-    h1 { font-size: 15px; margin: 0 0 10px; display: flex; align-items: center; gap: 6px; }
-    h1 .acct { margin-left: auto; font-size: 10px; font-weight: 600; color: #6d6d72; }
-    .card { background: #fff; border: 1px solid #e2e3e9; border-radius: 12px; padding: 10px; margin-bottom: 10px; }
-    .muted { color: #6d6d72; font-size: 11px; }
-    .row { display: flex; gap: 6px; margin: 8px 0; }
+    h1 { font-size: 16px; margin: 0 0 8px; display: flex; align-items: center; gap: 7px; color: #fff; text-shadow: 0 2px 12px rgba(10,18,50,.35); }
+    h1 .acct { margin-left: auto; font-size: 10px; font-weight: 650; color: #fff; background: rgba(255,255,255,.16); border: 1px solid rgba(255,255,255,.30); border-radius: 999px; padding: 5px 9px; box-shadow: inset 0 1px 0 rgba(255,255,255,.28), 0 5px 14px rgba(10,18,50,.18); }
+    .card { color: #fbfcff; background: linear-gradient(145deg, rgba(12,17,27,.90), rgba(18,23,35,.86)); border: 1px solid rgba(255,255,255,.34); border-radius: 16px; padding: 12px; margin-bottom: 10px; backdrop-filter: blur(16px) saturate(125%); -webkit-backdrop-filter: blur(16px) saturate(125%); box-shadow: inset 0 1px 0 rgba(255,255,255,.20), 0 8px 24px rgba(0,0,0,.28); }
+    .muted { color: #e1e6ef; font-size: 11px; }
+    .sec { color: #f7f9ff; }
+    .row { display: flex; gap: 7px; margin: 9px 0; }
     .row:last-child { margin-bottom: 0; }
     .chip {
-      flex: 1; border-radius: 8px; border: 1px solid #e2e3e9; background: #fff;
-      padding: 6px 0; font-size: 12px; font-weight: 600; cursor: pointer; color: #1c1c1e;
+      flex: 1; min-height: 34px; border-radius: 10px; border: 1px solid rgba(255,255,255,.24); background: rgba(255,255,255,.10);
+      padding: 7px 9px; font-size: 12px; font-weight: 650; cursor: pointer; color: #f7f9ff; box-shadow: inset 0 1px 0 rgba(255,255,255,.16), 0 2px 5px rgba(20,32,66,.08); transition: transform .16s ease, box-shadow .18s ease, background .18s ease;
     }
-    .chip.primary { background: #007aff; border-color: #007aff; color: #fff; }
-    .chip.stop { background: #ff3b30; border-color: #ff3b30; color: #fff; }
+    .chip.primary { background: linear-gradient(145deg, color-mix(in srgb,var(--accent),white 18%), var(--accent)); border-color: rgba(255,255,255,.66); color: #11151b; box-shadow: inset 0 1px 0 rgba(255,255,255,.62), 0 5px 12px color-mix(in srgb,var(--accent),transparent 60%); }
+    .chip.stop { background: linear-gradient(145deg, #ff756c, #e5484d); border-color: rgba(255,255,255,.48); color: #fff; }
     .chip.ghost { font-weight: 500; font-size: 11px; padding: 4px 8px; flex: 0 0 auto; }
-    button:active { transform: scale(.96); }
+    button:hover:not(:disabled) { transform: translateY(-2px); box-shadow: inset 0 1px 0 rgba(255,255,255,.88), 0 9px 17px rgba(20,32,66,.17); }
+    button:active { transform: translateY(0) scale(.975); }
     button:disabled { opacity: .5; cursor: default; }
-    input, select { border-radius: 8px; border: 1px solid #e2e3e9; padding: 6px 8px; font-size: 12px; outline: none; width: 100%; }
-    input:focus, select:focus { border-color: #007aff; }
+    input, select { border-radius: 10px; border: 1px solid rgba(255,255,255,.40); padding: 8px 10px; font-size: 12px; outline: none; width: 100%; color: #fff; background: rgba(5,8,14,.82); box-shadow: inset 0 1px 3px rgba(0,0,0,.35); }
+    input::placeholder { color: #c5ccd8; opacity: 1; }
+    input:focus, select:focus { border-color: #567df0; box-shadow: 0 0 0 3px rgba(72,115,240,.16); }
     ul { list-style: none; margin: 6px 0 0; padding: 0; }
     li { display: flex; justify-content: space-between; align-items: center; gap: 6px; padding: 5px 0; }
-    li + li { border-top: 1px solid #e2e3e9; }
-    @media (prefers-color-scheme: dark) { li + li { border-top-color: #38383a; } }
+    li + li { border-top: 1px solid rgba(255,255,255,.15); }
     .grow { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     .sec { font-weight: 600; margin-bottom: 6px; display: flex; align-items: center; gap: 6px; }
     .sec .spacer { margin-left: auto; }
     .tag { font-size: 9px; font-weight: 700; padding: 1px 5px; border-radius: 10px; flex: 0 0 auto; }
-    .tag.on { color: #ff3b30; background: #ff3b3020; }
-    .tag.off { color: #ff9500; background: #ff950020; }
-    .tag.ok { color: #34c759; background: #34c75920; }
-    .x { border: 0; background: none; color: #999; cursor: pointer; font-size: 13px; padding: 0 2px; flex: 0 0 auto; }
+    .tag.on { color: #ffd4d1; background: rgba(255,76,68,.24); }
+    .tag.off { color: #ffe2a9; background: rgba(255,181,46,.22); }
+    .tag.ok { color: #c9f6d7; background: rgba(52,199,89,.20); }
+    .x { border: 0; background: none; color: #e5eaf2; cursor: pointer; font-size: 15px; padding: 0 3px; flex: 0 0 auto; }
     .status-head { display: flex; gap: 8px; align-items: flex-start; }
-    .status-ico { font-size: 17px; line-height: 1; }
+    .status-ico { font-size: 17px; line-height: 1; color: var(--accent); text-shadow: 0 0 8px color-mix(in srgb,var(--accent),transparent 45%); }
     .days { display: flex; gap: 3px; margin: 8px 0; }
     .days button {
-      flex: 1; border-radius: 7px; border: 1px solid #e2e3e9; background: #fff;
-      font-size: 10px; padding: 4px 0; cursor: pointer; color: #1c1c1e;
+      flex: 1; border-radius: 8px; border: 1px solid rgba(255,255,255,.24); background: rgba(255,255,255,.10);
+      font-size: 10px; padding: 5px 0; cursor: pointer; color: #f7f9ff;
     }
-    .days button[aria-pressed="true"] { background: #007aff; border-color: #007aff; color: #fff; }
-    @media (prefers-color-scheme: dark) { .days button { background: #1c1c1e; border-color: #38383a; color: #f2f2f7; } }
-    .err { color: #ff3b30; font-size: 11px; margin-top: 6px; }
+    .days button[aria-pressed="true"] { background: #496fe3; border-color: #496fe3; color: #fff; }
+    .err { color: #ffb9b6; font-size: 11px; margin-top: 6px; font-weight: 600; }
+    #acctErr { color: #ffd6d3; }
+    :focus-visible { outline: 2px solid #315ed1; outline-offset: 2px; }
+    @media (prefers-reduced-motion: reduce) { *, *::before, *::after { transition-duration: .01ms !important; animation-duration: .01ms !important; } }
     .hide { display: none !important; }
+    .card { padding: 10px; margin-bottom: 7px; border-radius: 13px; }
+    .sec { margin-bottom: 4px; }
+    .row { margin: 6px 0; }
+    details.more { margin: 4px 0 8px; }
+    details.more > summary { cursor:pointer; padding:8px 10px; border-radius:11px; color:#f7f9ff; background:rgba(255,255,255,.09); border:1px solid rgba(255,255,255,.18); }
+    details.more[open] > summary { margin-bottom:8px; }
+    #limitInput, #limitMode, #limitAmount, #addLimitBtn, #limitName, #limitErr { display:none !important; }
+    #limitsPane > .card:first-child .row:has(#limitInput) { display:none !important; }
+    .more > .card:nth-of-type(1), .more > .card:nth-of-type(2) { display:none !important; }
+    #statsPane label:has(#audioTracking) { display:none !important; }
+    body[data-theme="event-horizon"] { --accent:#d98a3a; --accent-glow:rgba(240,182,90,.32); }
+    body[data-theme="violet-dusk"] { --accent:#7257c7; --accent-glow:rgba(169,150,232,.34); }
+    body[data-theme="obsidian-flow"], body[data-theme="monochrome-terrain"] { --accent:#777; --accent-glow:rgba(184,184,184,.23); }
+    body[data-theme="ember-horizon"] { --accent:#bd6045; --accent-glow:rgba(255,117,50,.34); }
+    body[data-theme="sculpted-bronze"] { --accent:#d2a176; --accent-glow:rgba(196,128,78,.30); }
+    body[data-theme="luminous-violet"] { --accent:#d694ff; --accent-glow:rgba(194,78,255,.34); }
+    .tabbar { display:flex; margin:0 -10px 9px; border-bottom:1px solid rgba(255,255,255,.2); }
+    .tabbar button { flex:1; border:0; border-bottom:2px solid transparent; padding:7px 4px 8px; color:#e0e5ee; background:transparent; font:650 11px -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif; cursor:pointer; }
+    .tabbar button[aria-selected="true"] { color:#fff; border-bottom-color:var(--accent); }
+    .usage-total { font-size:19px; font-weight:700; color:#fff; }
+    .usage-row { display:flex; align-items:center; gap:8px; padding:6px 0; border-top:1px solid rgba(255,255,255,.14); }
+    .usage-bar { height:4px; flex:1; border-radius:4px; background:rgba(255,255,255,.14); overflow:hidden; }
+    .usage-bar i { display:block; height:100%; background:var(--accent); }
+    .limit-select { width:auto; min-width:72px; padding:5px 6px; font-size:10px; }
+    body > .card:first-of-type, #statsPane > .card:first-child,
+    #limitsPane > .card:nth-child(2), #limitsPane > .card:nth-child(3) { display:none; }
+    body > h1 { margin-bottom: 5px; }
+    #statsPane .card, #limitsPane .card { background:linear-gradient(145deg,rgba(9,13,21,.92),rgba(16,20,30,.88)); }
+    #statusFocus { color:#fff !important; font-weight:650; }
+    .chip.ghost, .chip:not(.primary):not(.stop) { background:rgba(9,13,21,.72); border-color:rgba(255,255,255,.36); }
+    .usage-bar { background:rgba(255,255,255,.24); }
+    #usageList { max-height: 230px; overflow:auto; }
+    .usage-range { display:grid; grid-template-columns:1fr 1fr; gap:7px; margin:8px 0; }
+    .usage-range label { font-size:9px; color:#dce3ef; font-weight:650; text-transform:uppercase; letter-spacing:.06em; }
+    .usage-range input { margin-top:4px; padding:7px 8px; color-scheme:dark; }
+    .usage-quick { display:flex; gap:6px; margin-bottom:7px; }
   </style>
 </head>
 <body>
-  <h1>🧭 NORTH <span class="acct" id="acctLabel">this device</span></h1>
+  <h1><img src="north-logo.png" alt="" width="22" height="22" style="vertical-align:-5px;object-fit:contain;margin-right:5px"> NORTH Flow <span class="acct" id="acctLabel">This device</span><button class="chip ghost" id="openNorth">Open Flow</button></h1>
 
   <!-- What is enforced right now, from the shared engine -->
   <div class="card">
     <div class="status-head">
-      <span class="status-ico" id="statusIcon">🕊</span>
+      <span class="status-ico" id="statusIcon">○</span>
       <div class="grow">
-        <div style="font-weight: 600" id="statusHeadline">Loading…</div>
+        <div style="font-weight: 650" id="statusHeadline">Checking protection…</div>
         <div class="muted" id="statusDetail"></div>
-        <div class="muted" id="statusFocus" style="color:#007aff"></div>
+        <div class="muted" id="statusFocus" style="color:#405db6;font-weight:650"></div>
       </div>
     </div>
   </div>
 
+  <div class="tabbar" role="tablist" aria-label="Flow overview">
+    <button id="statsTab" role="tab" aria-selected="true" aria-controls="statsPane">Usage</button>
+    <button id="limitsTab" role="tab" aria-selected="false" aria-controls="limitsPane">Limits</button>
+  </div>
+  <section id="statsPane" role="tabpanel" aria-labelledby="statsTab">
+  <!-- The page in front of the person right now. Answered by the worker from
+       the same verdict the browser enforces, so it cannot disagree with it. -->
+  <div class="card">
+    <div class="sec">Current site <span class="spacer"></span><span class="muted" id="currentHost"></span></div>
+    <div id="currentState">—</div>
+    <div class="row hide" id="currentPauseRow">
+      <button class="chip" id="currentPause">Pause</button>
+    </div>
+  </div>
+  <div class="card">
+    <div class="sec">Website usage <span class="spacer"></span><span class="muted" id="usageCount">0 sites</span></div>
+    <div class="usage-range">
+      <label>From<input id="usageFrom" type="date" aria-label="Usage start date" /></label>
+      <label>To<input id="usageTo" type="date" aria-label="Usage end date" /></label>
+    </div>
+    <div class="usage-quick"><button class="chip ghost" id="usageToday">Today</button><button class="chip ghost" id="usageYesterday">Yesterday</button></div>
+    <div class="usage-total" id="usageTotal">0m</div>
+    <div id="usageWeekGraph" role="img" aria-label="Website usage over the last seven days" style="height:56px;display:flex;align-items:stretch;gap:6px;margin:3px 0 8px"></div>
+    <ul id="usageList"></ul>
+    <div class="muted" id="usageNote" style="margin-top:5px">Tracked locally while this browser is open.</div>
+    <button class="chip ghost" id="clearUsage" style="margin-top:8px;width:100%">Clear usage history on this browser</button>
+    <label class="muted" style="display:flex;align-items:center;gap:7px;margin-top:9px;cursor:pointer">
+      <input id="audioTracking" type="checkbox" style="width:14px;height:14px;margin:0;accent-color:var(--accent)" />
+      Also count audible background tabs
+    </label>
+  </div>
+  </section>
+
+  <section id="limitsPane" class="hide" role="tabpanel" aria-labelledby="limitsTab">
+  <div class="card">
+    <div class="sec">Website limits <span class="spacer"></span><span class="muted" id="limitsSyncStatus">This browser only</span></div>
+    <div class="muted" style="margin-bottom:7px">Manage limits in North Flow. This extension enforces them in this browser.</div>
+    <div class="row">
+      <input id="limitInput" list="visitedSites" placeholder="Choose or enter a website" aria-label="Website for a usage limit" />
+      <datalist id="visitedSites"></datalist>
+      <select class="limit-select" id="limitMode" aria-label="Limit type"><option value="daily">Daily</option><option value="session">Per visit</option></select>
+      <select class="limit-select" id="limitAmount" aria-label="Daily time allowance">
+        <option value="15">15m/day</option><option value="30">30m/day</option><option value="60" selected>1h/day</option>
+        <option value="120">2h/day</option><option value="240">4h/day</option>
+      </select>
+      <button class="chip primary" id="addLimitBtn" style="flex:0 0 auto;padding:6px 12px">Add</button>
+    </div>
+    <input id="limitName" placeholder="Limit name (optional)" aria-label="Optional limit name" style="margin-top:4px" />
+    <div class="err hide" id="limitErr"></div>
+    <ul id="limitList"></ul>
+  </div>
   <!-- Focus session -->
   <div class="card">
     <div class="sec">Focus session</div>
@@ -102,7 +190,9 @@
     <div class="err hide" id="siteErr"></div>
     <ul id="siteList"></ul>
   </div>
+  </section>
 
+  <details class="more"><summary>Account & sync</summary>
   <!-- Schedules (drive the same rules) -->
   <div class="card">
     <div class="sec">Schedules <span class="spacer"></span>
@@ -132,26 +222,22 @@
     <div class="muted" id="appRuleNote" style="margin-top:6px"></div>
   </div>
 
-  <!-- Usage -->
+  <!-- One-click pairing adopts the account currently signed in on North. -->
   <div class="card">
-    <div class="sec">Today's browsing <span class="spacer"></span><span class="muted">private, local</span></div>
-    <ul id="usageList"></ul>
-  </div>
-
-  <!-- Account link (identity only until the Supabase phase) -->
-  <div class="card">
-    <div class="sec">Account</div>
-    <div id="acctForm" class="row hide">
-      <input id="acctInput" placeholder="username from the web app" />
-      <button class="chip primary" id="acctSave" style="flex:0 0 auto;padding:6px 10px">Link</button>
+    <div class="sec">Account <span class="spacer"></span><span class="muted" id="acctMode"></span></div>
+    <div id="acctForm" class="hide">
+      <div class="muted" style="margin-bottom:8px">Use the account currently signed in to North in your browser.</div>
+      <button class="chip primary" id="acctConnect">Connect to North</button>
     </div>
     <div id="acctLinked">
       <div class="muted" id="acctNote"></div>
-      <div class="row">
-        <button class="chip ghost" id="acctUnlink">Unlink</button>
-      </div>
+      <div class="row"><button class="chip ghost" id="acctSignOut">Sign out</button></div>
     </div>
+    <div class="err hide" id="acctErr"></div>
   </div>
+  </details>
+
+  <div class="muted" id="aboutLine" style="text-align:center"></div>
 
   <script type="module" src="popup.js"></script>
 </body>

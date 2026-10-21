@@ -38,15 +38,39 @@
  * produce are synced, because they are permanent records.
  */
 
-import { supabase, supabaseConfigured } from "./supabase.js";
 import { normalizeState, defaultBlocking } from "../shared/blocking.js";
 import {
-  boardToRow, docFromProfile, isUuid, profileFromRows, pushable,
+  boardToRow, docFromProfile, isUuid, keepLocalTaskMeta, profileFromRows, pushable,
   rowToBoard, rowToSession, sessionToRow, signature, taskToRow,
 } from "./sync-map.js";
 
 const QUEUE_KEY = "north:syncq"; // pending storage keys, awaiting a push
-const HISTORY_DAYS = 119; // 17 weeks — a little more than the 16-week heatmap
+const HISTORY_DAYS = 183; // 26 weeks + margin — must cover the full activity heatmap
+
+/**
+ * Did this write fail because the project has not applied a migration yet?
+ *
+ * Two DIFFERENT PostgREST diagnostics mean the same thing here, and the
+ * difference is not cosmetic — an earlier version checked only the first and
+ * so silently missed every payload case:
+ *
+ *   42703     "column tasks.difficulty does not exist"
+ *             raised by Postgres when the missing column is REFERENCED (a
+ *             select, a filter, an order).
+ *   PGRST204  "Could not find the 'description' column of 'tasks' in the
+ *             schema cache"
+ *             raised by PostgREST when the missing column is in a WRITE
+ *             PAYLOAD — which is exactly the upsert shape both callers below
+ *             use. Verified against the live project: an upsert carrying an
+ *             unknown column answers PGRST204, not 42703.
+ *
+ * Matching both means a half-migrated project degrades (the new fields stay
+ * local) instead of losing every task it tries to push.
+ */
+const isMissingColumn = (e) =>
+  Boolean(e) && (e.code === "42703" || e.code === "PGRST204" ||
+    /column .* does not exist/i.test(e.message || "") ||
+    /could not find the .* column/i.test(e.message || ""));
 
 const ymd = (d) =>
   `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
@@ -56,12 +80,21 @@ export { isUuid, signature } from "./sync-map.js";
 export { newUuid } from "./sync-map.js";
 
 /**
+ * PLATFORM NEUTRAL ON PURPOSE. This module must load anywhere the NORTH
+ * engine runs — the browser, Node (tests) and React Native (apps/mobile/lib).
+ * It therefore imports NO client and touches NO browser global: the Supabase
+ * client arrives as an argument, and every read/write goes through the
+ * injected `store` (the host's `S.*` boundary — localStorage on web,
+ * AsyncStorage on the phone). `react-app/src/lib/supabase.js` is Vite-only
+ * (`import.meta.env`) and used to be imported here, which made this engine
+ * unloadable by Metro; it is now the *caller's* concern.
+ *
  * @param {object} opts
- * @param {object} opts.store       the app's local `S.*` boundary (cache + queue host)
- * @param {object} [opts.client]    Supabase client (injectable for tests)
+ * @param {object} opts.store       the host's local `S.*` boundary (cache + queue host)
+ * @param {object} [opts.client]    Supabase client (null when accounts are unavailable)
  * @param {boolean} [opts.configured] whether a real backend is available
  */
-export function createSync({ store, client = supabase, configured = supabaseConfigured }) {
+export function createSync({ store, client = null, configured = Boolean(client) }) {
   let userId = null;         // auth uid — the identity every table is scoped to
   let un = null;             // the device-stable username key
   let applying = false;      // true while pulling, so pulls never echo back as writes
@@ -74,18 +107,22 @@ export function createSync({ store, client = supabase, configured = supabaseConf
   const log = (...a) => { try { console.warn("[north sync]", ...a); } catch { /* no console */ } };
 
   // ── pending queue (persisted, so an offline write is never lost) ────────
+  // Persisted through the injected store rather than `localStorage` directly:
+  // the same record then survives a restart on the web (localStorage) and on
+  // the phone (AsyncStorage) with no platform branch here. The queue key is
+  // not `pushable`, so writing it never re-enqueues itself.
   async function readQueue() {
     try {
-      const raw = localStorage.getItem(QUEUE_KEY);
-      const list = raw ? JSON.parse(raw) : [];
+      const list = await store.get(QUEUE_KEY);
       return Array.isArray(list) ? list : [];
     } catch { return []; }
   }
   async function writeQueue(list) {
     try {
-      if (!list.length) localStorage.removeItem(QUEUE_KEY);
-      else localStorage.setItem(QUEUE_KEY, JSON.stringify([...new Set(list)]));
-    } catch { /* private mode — the push simply is not retried */ }
+      const uniq = [...new Set(list)];
+      if (!uniq.length) await store.del(QUEUE_KEY);
+      else await store.set(QUEUE_KEY, uniq);
+    } catch { /* no storage — the push simply is not retried */ }
   }
   async function enqueue(key) {
     const q = await readQueue();
@@ -107,7 +144,11 @@ export function createSync({ store, client = supabase, configured = supabaseConf
         allowTemporaryUnblock: doc.blocking.settings.allowTemporaryUnblock,
         tempUnblockMinutes: doc.blocking.settings.tempUnblockMinutes,
         apps: doc.apps,
+        hiddenUsageSites: doc.hiddenUsageSites,
         blocking: doc.blocking,
+        // Account theme. Sent only when the profile carries one, so a push
+        // never manufactures a default and overwrite the cloud value with it.
+        ...(doc.theme ? { theme: doc.theme } : {}),
       },
     };
     // `un` carries a unique constraint. Send it first so the leaderboard and
@@ -152,7 +193,20 @@ export function createSync({ store, client = supabase, configured = supabaseConf
     });
     const rows = tasks.map((t, i) => taskToRow(t, userId, i));
     if (rows.length) {
-      const { error } = await client.from("tasks").upsert(rows, { onConflict: "id" });
+      let { error } = await client.from("tasks").upsert(rows, { onConflict: "id" });
+      // The difficulty + description columns arrive with migration 005. A
+      // project that has not applied it rejects those two fields, so strip them
+      // and retry once: every other task field still syncs and the two extras
+      // stay on this device, which is exactly how they behaved before the
+      // columns existed. One metadata column must never cost the whole task.
+      if (isMissingColumn(error)) {
+        // Deliberately NOT rest-destructuring to drop the keys: listing what to
+        // keep would silently discard any column added later, and naming the
+        // dropped keys only to discard them is an unused binding. Copy and
+        // delete exactly what the schema is missing.
+        const bare = rows.map((r) => { const c = { ...r }; delete c.difficulty; delete c.description; return c; });
+        ({ error } = await client.from("tasks").upsert(bare, { onConflict: "id" }));
+      }
       if (error) { log("task push failed:", error.message); return false; }
     }
     const ids = rows.map((r) => r.id);
@@ -170,13 +224,14 @@ export function createSync({ store, client = supabase, configured = supabaseConf
     }));
     if (friends.length) {
       const { error } = await client.from("friends").upsert(friends, { onConflict: "user_id,friend_un" });
-      if (error) log("friend push failed:", error.message);
+      if (error) { log("friend push failed:", error.message); return false; }
     }
     const names = friends.map((f) => f.friend_un);
     let del = client.from("friends").delete().eq("user_id", userId);
     if (names.length) del = del.not("friend_un", "in", `(${names.join(",")})`);
     const { error: delErr } = await del;
-    if (delErr) log("friend prune failed:", delErr.message);
+    if (delErr) { log("friend prune failed:", delErr.message); return false; }
+    return true;
   }
 
   /**
@@ -239,10 +294,18 @@ export function createSync({ store, client = supabase, configured = supabaseConf
     // Insert-only (ignoreDuplicates): a session is an event and is never
     // rewritten. `daily_focus` is then rolled up by the database trigger, so
     // the totals that feed the leaderboard cannot be forged by a client.
-    const { error } = await client.from("focus_sessions").upsert(rows, {
+    let { error } = await client.from("focus_sessions").upsert(rows, {
       onConflict: "id",
       ignoreDuplicates: true,
     });
+    // The task_id column arrives with a migration; a project that has not
+    // applied it yet rejects the unknown column (42703). Strip the field and
+    // retry once — sessions still push, just unlinked, exactly as before the
+    // field existed. No behavior depends on the link being present.
+    if (isMissingColumn(error)) {
+      const bare = rows.map((r) => { const c = { ...r }; delete c.task_id; return c; });
+      ({ error } = await client.from("focus_sessions").upsert(bare, { onConflict: "id", ignoreDuplicates: true }));
+    }
     if (error) { log(`focus session push failed (${key}):`, error.message); return false; }
     return true;
   }
@@ -253,12 +316,16 @@ export function createSync({ store, client = supabase, configured = supabaseConf
       if (!profile || profile.un !== un) return true; // another account's record
       const sig = signature(key, profile);
       if (pushed.get(key) === sig) return true; // nothing shareable changed
-      await pushBoards(un); // tasks reference these
-      const ok = await pushProfileRow(profile);
-      await pushTasks(profile);
-      await pushFriends(profile);
+      const boardsOk = await pushBoards(un); // tasks reference these
+      const profileOk = await pushProfileRow(profile);
+      const tasksOk = await pushTasks(profile);
+      const friendsOk = await pushFriends(profile);
       await pushBlockingMirror(profile);
-      pushed.set(key, sig);
+      const ok = boardsOk && profileOk && tasksOk && friendsOk;
+      // Keep failed profile writes queued. Marking the signature here even on
+      // error caused the retry to be treated as a no-op and dropped, including
+      // edits to the account-owned website limits in profiles.settings.
+      if (ok) pushed.set(key, sig);
       return ok;
     }
     if (key.startsWith("bd:")) {
@@ -302,6 +369,13 @@ export function createSync({ store, client = supabase, configured = supabaseConf
     return running;
   }
 
+  async function flushProfile(username = un) {
+    if (!ready() || !username || username !== un) return { ok: false, reason: "not signed in" };
+    await enqueue(`u:${username}`);
+    if (running) await running;
+    return flush("profile preference");
+  }
+
   // ── pull ────────────────────────────────────────────────────────────────
   /**
    * Pull the account's rows into the device cache. Returns false when the
@@ -336,6 +410,20 @@ export function createSync({ store, client = supabase, configured = supabaseConf
         taskRows: taskRes.data || [],
         friendRows: friendRes.data || [],
       });
+      // This write REPLACES the local record, and a project without migration
+      // 005 returns no difficulty/description — so without this, every pull
+      // would erase the two fields the user typed on this device. See
+      // keepLocalTaskMeta: server values still win wherever they exist.
+      const prevLocal = await store.get(`u:${key}`).catch(() => null);
+      profile.tasks = keepLocalTaskMeta(profile.tasks, prevLocal?.tasks);
+      // A running focus window is device state: this device owns its timer, and
+      // a pull landing mid-session must not silently cancel a countdown that is
+      // still ticking (the window is published again on the next push, which is
+      // how the browser extension learns Focus Mode is on).
+      const localFocus = prevLocal?.blocking?.focus;
+      if (localFocus && Number(localFocus.endAt) > Date.now()) {
+        profile.blocking = { ...profile.blocking, focus: localFocus };
+      }
       await store.set(`u:${key}`, profile);
       await store.set(`bd:${key}`, (boardRes.data || []).map(rowToBoard));
 
@@ -364,6 +452,13 @@ export function createSync({ store, client = supabase, configured = supabaseConf
     if (!ready()) return false;
     const key = username || un;
     const local = await store.get(`u:${key}`);
+    // Pull FIRST, then push. The old order (push → pull) let a device with a
+    // half-populated local record push BEFORE it had seen the server: a fresh
+    // device's `tasks: []` prune would then DELETE the server rows another
+    // device had created, and only afterwards pull down the emptiness — silent
+    // cross-device data loss. Pulling first makes the server's state the base;
+    // the subsequent push offers only what this device adds on top of it.
+    const pulled = await pull(key);
     if (local) {
       await enqueue(`u:${key}`);
       await enqueue(`bd:${key}`);
@@ -371,7 +466,100 @@ export function createSync({ store, client = supabase, configured = supabaseConf
       if (await store.get(`fs:${key}:${today}`)) await enqueue(`fs:${key}:${today}`);
       await flush("bootstrap");
     }
-    return pull(key);
+    return pulled;
+  }
+
+  /**
+   * Read the account's theme straight from the cloud, before bootstrap runs.
+   * App calls this at sign-in to resolve local-vs-cloud without waiting for
+   * (or racing) the full pull. Returns null when there is no row yet (fresh
+   * account), no field yet, or the network fails — all three mean "the device
+   * keeps its current choice", which is also the offline answer.
+   */
+  async function peekTheme() {
+    if (!ready()) return null;
+    try {
+      const { data, error } = await client
+        .from("profiles")
+        .select("settings->theme")
+        .eq("id", userId)
+        .maybeSingle();
+      if (error) {
+        log("theme peek failed:", error.message);
+        return null;
+      }
+      // `settings->theme` arrives as { theme: "<environment id>" } (null when absent).
+      return data?.theme ?? null;
+    } catch (e) {
+      log("theme peek threw:", e?.message || e);
+      return null;
+    }
+  }
+
+  /**
+   * Does this auth user already have a North account (a profiles row)?
+   *
+   * The profiles row is created by the `on_auth_user_created` trigger at
+   * signup, so its existence is exactly the "has completed sign-up" fact —
+   * and asking about ONE'S OWN row after being authenticated is the query
+   * RLS was built to allow: no other user's data is touched, nothing is
+   * enumerable, no privileged role is involved.
+   *
+   * Used by the auth flow to keep "Sign in" and "Sign up" honest: a Google
+   * OAuth sign-in creates the auth user before the app ever runs, so intent
+   * (which screen the person used) is enforced afterwards — an unknown
+   * account arriving from the Sign in screen is signed back out with a clear
+   * message instead of silently becoming a sign-up.
+   */
+  async function hasAccount() {
+    if (!ready()) return false;
+    try {
+      const { data, error } = await client
+        .from("profiles")
+        .select("id")
+        .eq("id", userId)
+        .maybeSingle();
+      if (error) {
+        log("account probe failed:", error.message);
+        return false; // fail closed: treat as unknown → sign-up intent
+      }
+      return Boolean(data);
+    } catch (e) {
+      log("account probe threw:", e?.message || e);
+      return false;
+    }
+  }
+
+  /**
+   * The social graph, through the friend_action RPC (migration 003). All
+   * actions are server-enforced: the RPC checks ownership and reciprocity,
+   * so a client can only ever act on edges that genuinely involve it.
+   * Returns the RPC's result string, or throws a display-ready message.
+   */
+  async function friendAction(requesterUn, action) {
+    if (!ready()) throw new Error("not signed in");
+    const { data, error } = await client.rpc("friend_action", {
+      p_requester_un: requesterUn,
+      p_action: action,
+    });
+    if (error) throw new Error(error.message);
+    // Refresh my own edges + the friend feed after any mutation.
+    await pull().catch(() => {});
+    return data;
+  }
+
+  /** The friend feed: public productivity numbers for my accepted friends. */
+  async function friendFeed() {
+    if (!ready()) return [];
+    const { data, error } = await client.rpc("friend_feed");
+    if (error) { log("friend feed failed:", error.message); return []; }
+    return (data || []).map((r) => ({
+      un: r.un,
+      name: r.name || r.un,
+      fm: Number(r.focus_minutes) || 0,
+      activeDays: Number(r.active_days) || 0,
+      last: r.last_active || "",
+    }));
   }
 
   /**
@@ -435,8 +623,13 @@ export function createSync({ store, client = supabase, configured = supabaseConf
     detach() { userId = null; un = null; pushed.clear(); },
     ready,
     flush,
+    flushProfile,
     pull,
     bootstrap,
+    peekTheme,
+    hasAccount,
+    friendAction,
+    friendFeed,
     leaderboard,
     pendingCount: readQueue,
     /** Queue a local change for the server. Called by `S.set`. */

@@ -19,6 +19,24 @@ import { defaultBlocking, normalizeState } from "./blocking.js";
 /** Storage key for a user's profile record. Kept identical across clients. */
 export const PROFILE_KEY = (un) => `u:${un}`;
 
+/**
+ * Appearance ids, shared so every client resolves the account preference
+ * identically. North Glass is NOT an appearance — it is the design language
+ * every environment renders through.
+ *
+ * The registry holds the five BUILT-IN wallpapers, each of which is both the
+ * background image and the accent palette the whole app renders through
+ * ("custom" = a user-uploaded photo, kept device-local). The earlier generic
+ * gradients (aurora/sky/ocean/sunset/forest/midnight/soft/minimal) are gone;
+ * an account still carrying one of those ids is simply not "known" here, and
+ * clients keep their local choice rather than rendering something unknown.
+ */
+export const THEME_IDS = ["event-horizon", "violet-dusk", "obsidian-flow", "ember-horizon", "monochrome-terrain", "prism-horizon", "sculpted-bronze", "luminous-violet"];
+export const DEFAULT_THEME_ID = "sculpted-bronze";
+/** True when the id is one this build actually knows how to render. */
+export const isKnownTheme = (id) =>
+  typeof id === "string" && THEME_IDS.includes(id);
+
 /** Storage key for the local "who is signed in" pointer. */
 export const SESSION_KEY = "sess";
 
@@ -51,6 +69,34 @@ export function displayName(user) {
 export function initial(user) {
   const n = displayName(user).trim();
   return n ? n[0].toUpperCase() : "?";
+}
+
+/**
+ * Resolve an OAuth arrival against the user's declared intent.
+ *
+ * OAuth creates the auth user before the app runs, so the intent the person
+ * expressed — which screen they used — must be enforced afterwards. The only
+ * safe existence signal is the user's OWN profile row (created at signup by
+ * the server trigger): asking about it is a self-query under RLS, never an
+ * enumeration vector.
+ *
+ *   - existing account  → admitted from EITHER screen (a signup-tab click by
+ *     an existing user is still a legitimate sign-in)
+ *   - unknown account   → admitted ONLY from the sign-up tab; from the sign-in
+ *     tab it is refused with a pointer to Sign up, so a brand-new account
+ *     cannot silently materialize behind the back of a "Log in" button
+ *   - unknown probe (error/offline) → admitted as today; a broken check must
+ *     never lock legitimate people out of their accounts
+ *
+ * Pure so every client (web now, mobile next) enforces identical semantics,
+ * and testable without a database.
+ */
+export function resolveOAuthIntent({ accountExists, intent }) {
+  if (accountExists) return { action: "admit" };
+  if (accountExists === false && intent === "signin") {
+    return { action: "refuse", reason: "no-account" };
+  }
+  return { action: "admit" };
 }
 
 /**

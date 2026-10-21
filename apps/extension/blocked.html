@@ -1,0 +1,118 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Blocked by North Flow</title>
+  <style>
+    /* NORTH's own language: grouped gray canvas, one card, system font,
+       system blue accent, real dark mode. No images, no fonts to fetch —
+       this page has to render instantly and work with no network. */
+    :root {
+      color-scheme: light dark;
+      --bg: #f2f2f7;
+      --card: #ffffff;
+      --txt: #1c1c1e;
+      --sub: #6d6d72;
+      --muted: #98989e;
+      --border: #e2e3e9;
+      --acc: #007aff;
+      --err: #ff3b30;
+      --ok: #34c759;
+    }
+    @media (prefers-color-scheme: dark) {
+      :root {
+        --bg: #000000;
+        --card: #1c1c1e;
+        --txt: #f2f2f7;
+        --sub: #98989e;
+        --muted: #6d6d72;
+        --border: #38383a;
+      }
+    }
+    * { box-sizing: border-box; }
+    html, body { height: 100%; }
+    body {
+      margin: 0;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 24px;
+      background: var(--bg);
+      color: var(--txt);
+      font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI Variable", "Segoe UI", Roboto, sans-serif;
+      -webkit-font-smoothing: antialiased;
+    }
+    .wrap { width: 100%; max-width: 460px; }
+    .brand {
+      display: flex; align-items: center; gap: 8px;
+      justify-content: center; margin-bottom: 20px;
+      font-size: 13px; font-weight: 700; letter-spacing: 2.4px; color: var(--sub);
+    }
+    .card {
+      background: var(--card);
+      border: 1px solid var(--border);
+      border-radius: 20px;
+      padding: 30px 26px 24px;
+      text-align: center;
+      box-shadow: 0 20px 44px rgba(0, 0, 0, .11);
+    }
+    .mark {
+      width: 62px; height: 62px; border-radius: 50%;
+      margin: 0 auto 18px;
+      display: flex; align-items: center; justify-content: center;
+      font-size: 27px;
+      background: color-mix(in srgb, var(--err) 15%, transparent);
+    }
+    .card.focus .mark { background: color-mix(in srgb, var(--acc) 15%, transparent); }
+    h1 { font-size: 21px; line-height: 1.3; margin: 0 0 10px; font-weight: 700; letter-spacing: -.2px; }
+    p { margin: 0; font-size: 14px; line-height: 1.6; color: var(--sub); }
+    .domain {
+      display: inline-block; margin-top: 16px; padding: 5px 12px;
+      border-radius: 9px; background: var(--bg);
+      border: 1px solid var(--border);
+      font-size: 13px; font-weight: 600; color: var(--txt);
+      max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    }
+    .badge {
+      display: inline-block; margin-bottom: 14px; padding: 3px 10px;
+      border-radius: 20px; font-size: 10px; font-weight: 800; letter-spacing: .6px; text-transform: uppercase;
+      color: var(--err); background: color-mix(in srgb, var(--err) 14%, transparent);
+    }
+    .card.focus .badge { color: var(--acc); background: color-mix(in srgb, var(--acc) 14%, transparent); }
+    .timer { margin-top: 12px; font-size: 13px; font-weight: 600; color: var(--acc); font-variant-numeric: tabular-nums; }
+    .actions { display: flex; gap: 10px; margin-top: 24px; }
+    button {
+      font: inherit; font-size: 14px; font-weight: 600; cursor: pointer;
+      border-radius: 12px; padding: 12px 0; border: 1px solid var(--border);
+      background: var(--card); color: var(--txt); flex: 1;
+    }
+    button.primary { background: var(--acc); border-color: var(--acc); color: #fff; }
+    button:active { transform: scale(.98); }
+    .foot { margin-top: 18px; text-align: center; font-size: 11.5px; color: var(--muted); line-height: 1.6; }
+    .hide { display: none !important; }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <div class="brand">🧭 NORTH</div>
+    <div class="card" id="card">
+      <div class="mark" id="mark">🛡</div>
+      <div class="badge" id="badge">Blocked</div>
+      <h1 id="headline">This website is blocked by North Flow</h1>
+      <p id="detail">This website is on your blocked list in North.</p>
+      <div><span class="domain" id="domain"></span></div>
+      <div class="timer hide" id="timer"></div>
+      <div class="actions">
+        <button class="primary" id="oneMinute">+1 minute</button>
+        <button id="openNorth">Website details in Flow</button>
+      </div>
+      <button id="back" style="width:100%;margin-top:9px;background:transparent">Go back</button>
+    </div>
+    <div class="foot" id="foot">
+      Blocked in the browser by the NORTH extension — the request never left this device.
+    </div>
+  </div>
+  <script type="module" src="blocked.js"></script>
+</body>
+</html>

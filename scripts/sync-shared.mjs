@@ -71,11 +71,16 @@ export function runSync({ check = false } = {}) {
     }
   }
   // A copy whose canonical source was deleted must not be left behind.
+  // Directories may also hold client-OWNED modules (e.g. the extension's
+  // lib/north-auth.js in apps/extension/lib) — only flag files that are NOT
+  // marked as generated, i.e. files pretending to be vendored copies.
   for (const dir of TARGETS) {
     const abs = join(ROOT, dir);
     if (!existsSync(abs)) continue;
     for (const file of readdirSync(abs)) {
       if (!file.endsWith(".js") || CANONICAL.includes(file)) continue;
+      const raw = readFileSync(join(abs, file), "utf8");
+      if (!raw.startsWith("// ─")) continue; // client-owned module, not a copy
       messages.push(`unknown: ${dir}/${file} (not a canonical shared module)`);
     }
   }

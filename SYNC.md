@@ -54,6 +54,7 @@ Four files matter, and only one of them knows about the network:
 |---|---|---|---|
 | Display name, email | `u:<user>` | `profiles.name`, `.email`, `.un` | push + pull |
 | Pomodoro durations (`pm.w/sb/lb`) + sound/notify flags | `u:<user>` | `profiles.settings.pm` | push + pull |
+| Account theme (`light`/`dark`, registry open for Glass) | `u:<user>` | `profiles.settings.theme` | push + pull |
 | Blocking settings (block during focus, allow temp unblock, minutes) | `u:<user>` | `profiles.settings.{blockDuringFocus,allowTemporaryUnblock,tempUnblockMinutes}` | push + pull |
 | Block rules (`rules[]`) and schedule windows (`schedules[]`) | `u:<user>` | `profiles.settings.blocking` (jsonb, authoritative) **and** mirrored into `block_rules` + `block_schedules` | push + pull (jsonb); push-only (mirror) |
 | Tracked apps (name, icon, daily limit) | `u:<user>` | `profiles.settings.apps` | push + pull |
@@ -64,15 +65,24 @@ Four files matter, and only one of them knows about the network:
 | Daily focus totals | — | `daily_focus` | **pull only** |
 | Leaderboard | `lb:` (shared) | `leaderboard()` RPC | **pull only** |
 
-## 2. Data that deliberately does NOT sync
+## 2. The one countdown that travels: the focus window
+
+`blocking.focus` rides the profile document like the rules do. It has to:
+**Focus Mode started in the web app has to block sites in the browser**, and the
+extension is a client of the same account, not a separate product
+(`apps/extension/lib/account-merge.js`). Exactly one client writes it — the one
+running the timer — and the enforcers only read it, so there is no race. It is
+cleared when the session ends, which is what makes "Focus Mode is over" stop
+enforcement in the browser.
+
+## 2b. Data that deliberately does NOT sync
 
 Each of these is a decision, not an oversight.
 
 | Data | Where it lives | Why |
 |---|---|---|
-| Running focus window (`blocking.focus`) | device (`u:` record locally) | It is a countdown. Syncing it would let one device start a session that pauses another device's enforcement for a reason that no longer exists on that device. Each client evaluates its own. |
-| Temporary unblocks (`blocking.unblocks`) | device | It is an expiry. Same reasoning — a 5-minute pause granted on a phone must not silently unblock a laptop an hour later. |
-| Theme (`fl_th`) | `localStorage`, device | Currently device-local. **This is a known gap against the plan** — "user preferences should follow the account" — and is Step 4's job. |
+| Temporary unblocks (`blocking.unblocks`) | device | It is an expiry. A 5-minute pause granted on a phone must not silently unblock a laptop an hour later, and the pause exists precisely because *that* device was being interrupted. The extension never accepts one from the account either. |
+| Theme choice before sign-in (`fl_th`) | `localStorage`, device | The signed-out/offline preference. At sign-in the cloud's `settings.theme` wins if it has one; a silent cloud (fresh account or offline) adopts the device's choice as the account's first synced value. While signed out, changes stay device-local. |
 | Right-click menu preference (`fl_ctx`) | `localStorage`, device | A genuine per-device preference (whether to intercept the browser menu). |
 | Signed-in pointer (`sess`) | `localStorage`, device | Superseded by the Supabase session; it exists so the app boots offline. |
 | Daily totals (`fo:`) | local cache | Never pushed. The database computes them from `focus_sessions` via a trigger, precisely so a client cannot forge its own score. Client writes to `fo:` are local-only and get corrected by the next pull. |
@@ -157,7 +167,7 @@ is a reasonable trade; it would not be for collaborative editing.
 
 | Client | Where its data actually lives | What it would need |
 |---|---|---|
-| Browser extension | `chrome.storage.local` (`northBlocking`, `usage`); the "account" is a username string | Real sign-in (`chrome.identity` + web redirect), then push/pull through the same tables |
+| Browser extension | `chrome.storage.local` (`northBlocking`, `usage`, `northBlockedAttempts`) — **now a real client**: `lib/north-auth.js` speaks the GoTrue REST protocol and `background.js` syncs rules/schedules/description and uploads finished days of usage through the same tables | Google sign-in (`chrome.identity` + web redirect). Email + password auth is complete. Blocked-attempt counts stay local (uploading them would need a `usage_records` column) |
 | Desktop app | `north-blocking.json` in the OS app-config dir | Sign-in, and a build that has ever been compiled |
 | Mobile app | React state only — **lost on every restart** | `AsyncStorage` first, then sign-in |
 

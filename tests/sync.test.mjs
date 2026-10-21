@@ -12,8 +12,9 @@ import assert from "node:assert/strict";
 
 import { defaultBlocking } from "../packages/shared-types/blocking.js";
 import {
-  BOARD_COL_IDS, boardToRow, docFromProfile, isUuid, newUuid, profileFromRows,
-  pushable, rowToBoard, rowToSession, rowToTask, sessionToRow, signature, taskToRow,
+  BOARD_COL_IDS, boardToRow, docFromProfile, isUuid, keepLocalTaskMeta, newUuid,
+  profileFromRows, pushable, rowToBoard, rowToSession, rowToTask, sessionToRow,
+  signature, taskToRow,
 } from "../react-app/src/lib/sync-map.js";
 
 const USER = "11111111-2222-4333-8444-555555555555";
@@ -106,9 +107,67 @@ test("a focus session round-trips, and actual seconds can never exceed the plan"
   assert.equal(sessionToRow({ ...session, type: "nap" }, USER).phase, "focus");
 });
 
-test("the shared document keeps rules, schedules, settings and apps — and drops the ephemeral fields", () => {
+test("a focus session carries its task through the round trip — and survives a task-less one", () => {
+  const start = Date.parse("2026-09-25T09:00:00.000Z");
+  const taskId = newUuid();
+  const linked = {
+    id: newUuid(), type: "focus", start, end: start + 900_000,
+    planned: 900, actual: 900, completed: true, taskId,
+  };
+  const row = sessionToRow(linked, USER);
+  assert.equal(row.task_id, taskId, "a uuid task id travels to the table");
+  const back = rowToSession(row);
+  assert.equal(back.taskId, taskId, "and comes back attached to the session");
+
+  // No task chosen — the default. Nothing about the row changes shape.
+  const solo = sessionToRow({ ...linked, id: newUuid(), taskId: undefined }, USER);
+  assert.equal(solo.task_id, null, "an unlinked session pushes as null");
+  assert.equal("taskId" in rowToSession(solo), false, "absent key, not an empty one");
+
+  // Values the foreign key cannot accept are nulled, never pushed raw.
+  assert.equal(sessionToRow({ ...linked, taskId: "legacy-1" }, USER).task_id, null);
+  assert.equal(sessionToRow({ ...linked, taskId: "none" }, USER).task_id, null);
+  assert.equal(sessionToRow({ ...linked, taskId: "" }, USER).task_id, null);
+});
+
+test("the account theme rides the profile document and comes back from settings", () => {
+  // Pushed when the profile carries one…
+  const doc = docFromProfile({ name: "A", theme: "dark", blocking: defaultBlocking() });
+  assert.equal(doc.theme, "dark");
+  // …and absent when it never had one, so a push can't manufacture a default
+  // and clobber the cloud value with it.
+  const bare = docFromProfile({ name: "A", blocking: defaultBlocking() });
+  assert.equal("theme" in bare, false, "no theme → no theme key, not an empty one");
+
+  // Pulled verbatim from settings.jsonb — including an id this build can't
+  // render (an older client must not discard a newer client's choice).
+  assert.equal(
+    profileFromRows({ un: "a", profileRow: { un: "a", settings: { theme: "paper" } } }).theme,
+    "paper"
+  );
+  assert.equal("theme" in profileFromRows({ un: "a", profileRow: { un: "a" } }), false);
+});
+
+test("hidden website usage preferences round-trip through the synced profile document", () => {
+  const hiddenUsageSites = ["example.com", "social.test"];
+  const doc = docFromProfile({ name: "A", hiddenUsageSites, blocking: defaultBlocking() });
+  assert.deepEqual(doc.hiddenUsageSites, hiddenUsageSites);
+  assert.deepEqual(
+    profileFromRows({ un: "a", profileRow: { settings: { hiddenUsageSites } } }).hiddenUsageSites,
+    hiddenUsageSites
+  );
+  const key = "u:a";
+  assert.notEqual(
+    signature(key, { un: "a", blocking: defaultBlocking() }),
+    signature(key, { un: "a", hiddenUsageSites, blocking: defaultBlocking() }),
+    "changing hidden sites must enqueue the profile for account sync"
+  );
+});
+
+test("the shared document keeps rules, schedules, settings, apps and the running focus window — but never a local pause", () => {
   const blocking = defaultBlocking();
   blocking.rules = [{ id: "r1", kind: "website", target: "youtube.com", label: "", enabled: true, when: "always", scheduleIds: [], createdAt: 1 }];
+  blocking.usageLimits = [{ id: "l1", target: "reddit.com", dailyLimitMinutes: 30, enabled: true }];
   blocking.schedules = [{ id: "s1", name: "Work hours", days: [1, 2, 3, 4, 5], start: "09:00", end: "17:00", enabled: true }];
   blocking.settings = { ...blocking.settings, tempUnblockMinutes: 10 };
   blocking.unblocks = { r1: Date.now() + 60000 };       // device-local
@@ -123,9 +182,14 @@ test("the shared document keeps rules, schedules, settings and apps — and drop
   assert.equal(doc.pm.w, 30);
   assert.equal(doc.apps.length, 1);
   assert.equal(doc.blocking.rules.length, 1);
+  assert.equal(doc.blocking.usageLimits[0].dailyLimitMinutes, 30);
   assert.equal(doc.blocking.schedules.length, 1);
   assert.equal(doc.blocking.settings.tempUnblockMinutes, 10);
-  assert.equal("focus" in doc.blocking, false, "a running session belongs to one device");
+  // Focus Mode DOES travel: it is started in North and enforced by the browser
+  // extension, which reads this document (apps/extension/lib/account-merge.js).
+  assert.equal(doc.blocking.focus.endAt, blocking.focus.endAt, "the running focus window is published");
+  // A temporary unblock is the opposite case: an expiring local pause, which
+  // must never let one device hold another device's enforcement open.
   assert.equal("unblocks" in doc.blocking, false, "a pause belongs to one device");
 });
 
@@ -141,6 +205,7 @@ test("a profile is rebuilt from its rows into something a screen can render at o
         blockDuringFocus: false,
         blocking: {
           rules: [{ id: "r1", kind: "website", target: "reddit.com", label: "", enabled: false, when: "focus", scheduleIds: [] }],
+          usageLimits: [{ id: "l1", target: "youtube.com", dailyLimitMinutes: 60, enabled: true }],
           schedules: [],
           settings: { blockDuringFocus: true, allowTemporaryUnblock: true, tempUnblockMinutes: 5 },
         },
@@ -163,6 +228,7 @@ test("a profile is rebuilt from its rows into something a screen can render at o
   assert.equal(profile.pm.w, 30);
   assert.equal(profile.blocking.rules.length, 1);
   assert.equal(profile.blocking.rules[0].when, "focus");
+  assert.equal(profile.blocking.usageLimits[0].target, "youtube.com");
   // The schema-shaped column wins only when the client document is silent.
   assert.equal(profile.blocking.settings.blockDuringFocus, true);
   // Ephemeral state is always reset on load, never resurrected from the server.
@@ -189,17 +255,19 @@ test("only keys with a destination are pushed", () => {
   assert.equal(pushable("sess"), false);
 });
 
-test("the fingerprint ignores the focus window but notices a real edit", () => {
+test("the fingerprint ignores a local pause but notices a focus session, an edit and a toggle", () => {
   const key = "u:aarav";
   const base = {
     un: "aarav", name: "Aarav", tasks: [{ id: newUuid(), title: "Ship", pri: "high", cat: "Work", completed: false }],
     blocking: defaultBlocking(),
   };
 
-  // Starting, pausing or finishing a session must cost nothing.
-  const paused = { ...base, blocking: { ...base.blocking, focus: { startedAt: 1, minutes: 25, endAt: 2 } } };
-  assert.equal(signature(key, base), signature(key, paused));
+  // Starting (and hence finishing) Focus Mode IS pushed — that is how the
+  // browser extension learns a session is running.
+  const focusing = { ...base, blocking: { ...base.blocking, focus: { startedAt: 1, minutes: 25, endAt: Date.now() + 60000 } } };
+  assert.notEqual(signature(key, base), signature(key, focusing));
 
+  // A temporary unblock is device-local, so pausing must cost no round trip.
   const unblocked = { ...base, blocking: { ...base.blocking, unblocks: { r1: 123 } } };
   assert.equal(signature(key, base), signature(key, unblocked));
 
@@ -217,4 +285,87 @@ test("the fingerprint ignores the focus window but notices a real edit", () => {
   // Board order and session membership fingerprint by identity.
   assert.notEqual(signature("bd:aarav", [{ id: BOARD }]), signature("bd:aarav", [{ id: BOARD, name: "Renamed" }]));
   assert.notEqual(signature("fs:aarav:2026-09-25", [{ id: "a" }]), signature("fs:aarav:2026-09-25", [{ id: "a" }, { id: "b" }]));
+
+  // Difficulty and description travel, so a change to ONLY one of them must be
+  // pushed. Regression guard: these were absent from the fingerprint, which
+  // meant editing a task's difficulty pushed nothing at all.
+  const harder = { ...base, tasks: [{ ...base.tasks[0], diff: "hard" }] };
+  assert.notEqual(signature(key, base), signature(key, harder));
+  const described = { ...base, tasks: [{ ...base.tasks[0], desc: "Include the breaking changes" }] };
+  assert.notEqual(signature(key, base), signature(key, described));
+
+  // But a legacy record carrying no difficulty must NOT look edited the moment
+  // it is read back from a row that backfilled 'medium' — otherwise every pull
+  // would trigger a pointless push.
+  const legacy = { ...base, tasks: [{ ...base.tasks[0] }] };
+  const explicitMedium = { ...base, tasks: [{ ...base.tasks[0], diff: "medium", desc: "" }] };
+  assert.equal(signature(key, legacy), signature(key, explicitMedium));
+});
+
+test("a task carries difficulty and description through the round trip", () => {
+  const task = {
+    id: newUuid(), title: "Write the release notes", pri: "high", cat: "Work",
+    diff: "hard", desc: "Include the breaking changes", completed: false,
+  };
+  const row = taskToRow(task, USER, 0);
+  assert.equal(row.difficulty, "hard");
+  assert.equal(row.description, "Include the breaking changes");
+
+  const back = rowToTask({ ...row, created_at: "2026-01-01T00:00:00.000Z" });
+  assert.equal(back.diff, "hard");
+  assert.equal(back.desc, "Include the breaking changes");
+});
+
+test("a pre-migration row reads as medium difficulty and no description", () => {
+  // A row from before migration 005 has no difficulty/description keys at all.
+  const row = taskToRow({ id: newUuid(), title: "Read", pri: "low", cat: "Study" }, USER, 0);
+  delete row.difficulty;
+  delete row.description;
+  const back = rowToTask({ ...row, created_at: "2026-01-01T00:00:00.000Z" });
+
+  // Absent, not empty — `diffOf()` downstream already reads a missing
+  // difficulty as "medium" and the row only renders a description if present.
+  assert.equal("diff" in back, false);
+  assert.equal("desc" in back, false);
+
+  // And an empty description must not be written as "".
+  assert.equal(taskToRow({ id: newUuid(), title: "x", desc: "" }, USER, 0).description, null);
+});
+
+test("a pull never destroys local difficulty or description", () => {
+  const id = newUuid();
+  const local = [{ id, title: "Ship", pri: "high", diff: "hard", desc: "Breaking changes", completed: false }];
+
+  // The server row a pre-005 project returns: no difficulty, no description.
+  const fromServer = [{ id, title: "Ship", pri: "high", cat: "Work", completed: false }];
+  const merged = keepLocalTaskMeta(fromServer, local);
+  assert.equal(merged[0].diff, "hard");
+  assert.equal(merged[0].desc, "Breaking changes");
+
+  // Once migration 005 is applied the server DOES have values — and the
+  // server is the shared record, so it wins outright.
+  const withColumns = [{ ...fromServer[0], diff: "easy", desc: "Revised on another device" }];
+  const won = keepLocalTaskMeta(withColumns, local);
+  assert.equal(won[0].diff, "easy");
+  assert.equal(won[0].desc, "Revised on another device");
+
+  // A task deleted on another device must STAY deleted: the result is built
+  // from the pulled list, so nothing local is resurrected.
+  assert.equal(keepLocalTaskMeta([], local).length, 0);
+
+  // A task that only exists locally is untouched by this rule (it is not in
+  // the pulled list), and a brand-new server task needs no carry-over.
+  assert.equal(keepLocalTaskMeta([{ id: newUuid(), title: "New" }], local)[0].diff, undefined);
+});
+
+test("difficulty is sanitized like priority, and a huge description is capped", () => {
+  const row = taskToRow({ id: newUuid(), title: "x", diff: "impossible", desc: "z".repeat(5000) }, USER, 0);
+  assert.equal(row.difficulty, "medium", "an unknown difficulty falls back to medium");
+  assert.equal(row.description.length, 2000);
+
+  // Difficulty is its OWN scale, not a second priority: "important but easy"
+  // has to be representable, so a valid difficulty is never copied from pri.
+  const easyButUrgent = taskToRow({ id: newUuid(), title: "x", pri: "high", diff: "easy" }, USER, 0);
+  assert.equal(easyButUrgent.priority, "high");
+  assert.equal(easyButUrgent.difficulty, "easy");
 });

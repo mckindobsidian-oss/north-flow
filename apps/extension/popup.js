@@ -7,6 +7,7 @@
  * textContent, so a hostname can never be interpreted as markup.
  */
 import { WEEKDAY_LABELS, WORKDAYS } from "./lib/blocking.js";
+import { encodeReason, scheduleNames, describeBlock } from "./lib/block-reason.js";
 
 const $ = (id) => document.getElementById(id);
 const send = (msg) => chrome.runtime.sendMessage(msg);
@@ -14,6 +15,7 @@ const send = (msg) => chrome.runtime.sendMessage(msg);
 /** New-schedule draft, kept in the popup until the worker accepts it. */
 let draftDays = [...WORKDAYS];
 let snapshot = null;
+let usageRange = null;
 
 /**
  * Tiny DOM builder. `props` are element properties (textContent, className,
@@ -29,25 +31,93 @@ const el = (tag, { attrs, ...props } = {}, children = []) => {
 };
 
 const show = (node, visible) => node.classList.toggle("hide", !visible);
+const usageLabel = (seconds) => seconds < 60 ? `${seconds}s` : seconds < 3600
+  ? `${Math.floor(seconds / 60)}m ${seconds % 60}s`
+  : `${Math.floor(seconds / 3600)}h ${Math.floor(seconds % 3600 / 60)}m`;
+const dayKey = (offset = 0) => { const date = new Date(); date.setUTCDate(date.getUTCDate() + offset); return date.toISOString().slice(0, 10); };
+
+function renderUsage(rows, from, to) {
+  const list = Array.isArray(rows) ? rows : [];
+  const ul = $("usageList");
+  ul.replaceChildren();
+  const totalSeconds = list.reduce((sum, row) => sum + (Number(row.seconds) || 0), 0);
+  const maxSeconds = Math.max(1, ...list.map((row) => Number(row.seconds) || 0));
+  $("usageTotal").textContent = usageLabel(totalSeconds);
+  $("usageCount").textContent = `${list.length} site${list.length === 1 ? "" : "s"}`;
+  $("usageNote").textContent = list.length
+    ? `Stored browsing usage · ${from === to ? from : `${from} to ${to}`}`
+    : `No browsing recorded for ${from === to ? from : "this date range"}`;
+  if (!list.length) ul.append(el("li", { className: "muted", textContent: "No browsing recorded for this period" }));
+  for (const { host, seconds } of list) {
+    const li = el("li", { className: "usage-row" });
+    li.append(el("span", { className: "grow", textContent: host }));
+    const bar = el("span", { className: "usage-bar" });
+    bar.append(el("i", { style: { width: `${Math.max(3, Math.round((Number(seconds) || 0) / maxSeconds * 100))}%` } }));
+    li.append(bar, el("span", { className: "muted", textContent: usageLabel(seconds) }));
+    ul.append(li);
+  }
+}
+
+async function refreshUsageRange() {
+  const from = $("usageFrom").value || dayKey();
+  const to = $("usageTo").value || from;
+  const result = await send({ type: "getUsageRange", from, to });
+  if (result?.ok) { usageRange = result; renderUsage(result.usage, result.from, result.to); }
+}
 
 // ── render ────────────────────────────────────────────────────────────────
 function render() {
   const s = snapshot;
   if (!s) return;
+  const theme = ["event-horizon", "violet-dusk", "obsidian-flow", "ember-horizon", "monochrome-terrain", "sculpted-bronze", "luminous-violet"].includes(s.theme) ? s.theme : "sculpted-bronze";
+  document.body.dataset.theme = theme;
+  const wallpaper = theme === "sculpted-bronze" ? "sculpted-bronze-ribbon.png" : theme === "luminous-violet" ? "luminous-violet-ribbon.png" : `${theme}.png`;
+  document.body.style.setProperty("--wallpaper", `url("wallpapers/${wallpaper}")`);
 
   // Status (already phrased by the shared engine)
-  $("statusIcon").textContent = s.status.active ? "🛡" : "🕊";
+  $("statusIcon").textContent = s.status.active ? "●" : "○";
   $("statusHeadline").textContent = s.status.headline;
   $("statusDetail").textContent = s.status.detail;
   $("statusFocus").textContent = s.focus.active
-    ? `Focus session · ${s.focus.minutesLeft}m left`
+    ? `Focus session active · ${s.focus.minutesLeft} min remaining`
     : "";
+
+  // The page in front of the person: is it blocked, and by what? The reason
+  // wording comes from the same module the block page uses, so the two can
+  // never describe the same rule differently.
+  const cur = s.current;
+  $("currentHost").textContent = cur ? cur.host : "";
+  if (!cur) {
+    $("currentState").textContent = "No active website";
+    $("currentState").style.color = "";
+  } else if (cur.blocked) {
+    const why = describeBlock({
+      code: encodeReason(cur.reason),
+      domain: cur.host,
+      names: scheduleNames(cur.reason),
+      minutesLeft: s.focus.minutesLeft,
+    });
+    $("currentState").textContent = `Blocked · ${why.badge}`;
+    $("currentState").style.color = why.tone === "focus" ? "#007aff" : "#ff3b30";
+  } else {
+    $("currentState").textContent = "Allowed";
+    $("currentState").style.color = "#34c759";
+  }
+  const canPause = Boolean(cur?.blocked && cur.ruleId && !cur.paused && s.settings.allowTemporaryUnblock);
+  show($("currentPauseRow"), canPause);
+  if (canPause) {
+    $("currentPause").textContent = `Pause ${s.settings.tempUnblockMinutes}m`;
+    $("currentPause").onclick = async () => {
+      await send({ type: "unblockRule", id: cur.ruleId });
+      await refresh();
+    };
+  }
 
   // Focus controls
   const running = s.focus.active;
-  $("focusLabel").textContent = running
-    ? `Focusing — ${s.focus.minutesLeft} min left`
-    : "No active session";
+    $("focusLabel").textContent = running
+    ? `Focus session · ${s.focus.minutesLeft} min remaining`
+    : "No focus session is running";
   show($("focusRow"), !running);
   show($("stopBtn"), running);
 
@@ -62,7 +132,7 @@ function render() {
     const active = rule.reasons && !paused;
     const li = el("li", {});
     li.append(el("span", { className: "grow", textContent: rule.target, title: rule.target }));
-    if (active) li.append(el("span", { className: "tag on", textContent: "ON" }));
+    if (active) li.append(el("span", { className: "tag on", textContent: "BLOCKING" }));
     else if (paused) li.append(el("span", { className: "tag off", textContent: "PAUSED" }));
     else li.append(el("span", { className: "tag ok", textContent: rule.whenLabel }));
     if (active) {
@@ -89,6 +159,32 @@ function render() {
       })
     );
     list.append(li);
+  }
+
+  const limitList = $("limitList");
+  limitList.replaceChildren();
+  if (!s.usageLimits.length) limitList.append(el("li", { className: "muted", textContent: "No website limits yet" }));
+  for (const limit of s.usageLimits) {
+    const li = el("li", {});
+    li.append(el("span", { className: "grow", textContent: limit.name ? `${limit.name} · ${limit.target}` : limit.target, title: limit.target }));
+    const minutesUsed = Math.floor(limit.usedSeconds / 60);
+    li.append(el("span", { className: `tag ${limit.reached ? "on" : "ok"}`, textContent: limit.mode === "session" ? "PER VISIT" : limit.reached ? "LIMIT REACHED" : `${minutesUsed}/${limit.dailyLimitMinutes}m` }));
+    if (limit.mode !== "session") {
+      const amount = el("select", {
+        className: "limit-select",
+        attrs: { "aria-label": `Daily allowance for ${limit.target}` },
+        onchange: async (event) => { await send({ type: "setUsageLimit", id: limit.id, minutes: Number(event.target.value) }); await refresh(); },
+      });
+      for (const [value, label] of [[15, "15m/day"], [30, "30m/day"], [60, "1h/day"], [120, "2h/day"], [240, "4h/day"]]) amount.append(el("option", { value: String(value), textContent: label }));
+      amount.value = String(limit.dailyLimitMinutes);
+      li.append(amount);
+    }
+    li.append(el("button", {
+      className: "x", textContent: "✕",
+      attrs: { "aria-label": `Remove daily limit for ${limit.target}` },
+      onclick: async () => { await send({ type: "removeUsageLimit", id: limit.id }); await refresh(); },
+    }));
+    limitList.append(li);
   }
 
   // Schedules
@@ -156,26 +252,56 @@ function render() {
     : "Name applications in the web app; the desktop client enforces them.";
 
   // Usage
-  const ul = $("usageList");
-  ul.replaceChildren();
-  if (!s.usageToday.length) {
-    ul.append(el("li", { className: "muted", textContent: "No data yet — browsing time is tracked privately" }));
+  const choices = $("visitedSites");
+  choices.replaceChildren(...s.usageToday.map(({ host }) => el("option", { value: host })));
+  if (!$("usageFrom").value) $("usageFrom").value = dayKey();
+  if (!$("usageTo").value) $("usageTo").value = dayKey();
+  if (usageRange) renderUsage(usageRange.usage, usageRange.from, usageRange.to);
+  else renderUsage(s.usageToday, dayKey(), dayKey());
+  $("audioTracking").checked = Boolean(s.trackBackgroundAudio);
+  const week = s.usageWeek || [];
+  const maxDay = Math.max(1, ...week.map((day) => day.seconds));
+  const graph = $("usageWeekGraph");
+  graph.replaceChildren();
+  graph.setAttribute("aria-label", `Last seven days: ${week.map((day) => `${day.label} ${Math.round(day.seconds / 60)} minutes`).join(", ")}`);
+  for (const day of week) {
+    const col = document.createElement("div");
+    col.title = `${day.day}: ${Math.round(day.seconds / 60)}m`;
+    col.style.cssText = "flex:1;display:flex;flex-direction:column;justify-content:flex-end;align-items:center;gap:3px";
+    const bar = document.createElement("span");
+    bar.style.cssText = `display:block;width:70%;height:${day.seconds ? Math.max(4, day.seconds / maxDay * 37) : 2}px;border-radius:5px;background:${day.day === new Date().toISOString().slice(0, 10) ? "var(--accent)" : "rgba(255,255,255,.45)"}`;
+    const label = document.createElement("span");
+    label.className = "muted";
+    label.style.fontSize = "9px";
+    label.textContent = day.label;
+    col.append(bar, label);
+    graph.append(col);
   }
-  for (const { host, minutes } of s.usageToday) {
+  // Blocked attempts are counted locally (never uploaded — see README), and
+  // they are the half of screen time the person actually wants to see.
+  for (const { host, count } of ($("usageFrom").value === dayKey() && $("usageTo").value === dayKey() ? s.blockedToday : []) || []) {
     const li = el("li", {});
     li.append(el("span", { className: "grow", textContent: host }));
-    li.append(el("span", { className: "muted", textContent: `${minutes}m` }));
-    ul.append(li);
+    li.append(el("span", { className: "tag on", textContent: `${count} BLOCKED` }));
+    $("usageList").append(li);
   }
 
   // Account + honest scope note
-  $("acctLabel").textContent = s.account ? s.account.un : "this device";
-  show($("acctForm"), !s.account);
-  show($("acctLinked"), Boolean(s.account));
-  if (s.account) {
-    $("acctNote").textContent =
-      `Linked to ${s.account.un}. Rules stay on this device until account sync ships (SETUP.md).`;
-  }
+  const authed = Boolean(s.account?.authUserId);
+  $("acctLabel").textContent = authed ? s.account.un : "Not linked";
+  $("acctMode").textContent = authed ? "Connected" : "";
+  show($("acctForm"), !authed);
+  show($("acctLinked"), authed);
+  if (authed) $("acctNote").textContent = s.lastSync
+    ? `Connected as ${s.account.un} · last successful sync ${new Date(s.lastSync).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}.`
+    : `Connected as ${s.account.un} · waiting for the first successful sync.`;
+  $("limitsSyncStatus").textContent = !authed ? "This browser only" : s.lastSync ? "Account synced" : "Sync pending";
+
+  // Version + last reconciliation, so "is it actually syncing?" has an answer
+  // that isn't a guess.
+  $("aboutLine").textContent = s.lastSync
+    ? `v${s.version} · last synced ${new Date(s.lastSync).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}`
+    : `v${s.version} · not synced to an account yet`;
 }
 
 async function refresh() {
@@ -207,10 +333,56 @@ async function addSite() {
   }
   await refresh();
 }
+
+const showPopupTab = (tab) => {
+  const stats = tab === "stats";
+  $("statsPane").classList.toggle("hide", !stats);
+  $("limitsPane").classList.toggle("hide", stats);
+  $("statsTab").setAttribute("aria-selected", String(stats));
+  $("limitsTab").setAttribute("aria-selected", String(!stats));
+};
+$("statsTab").onclick = () => showPopupTab("stats");
+$("limitsTab").onclick = () => showPopupTab("limits");
+$("audioTracking").onchange = async (event) => {
+  const result = await send({ type: "setBackgroundAudio", enabled: event.target.checked });
+  if (!result?.ok) event.target.checked = !event.target.checked;
+  await refresh();
+};
+$("usageFrom").onchange = refreshUsageRange;
+$("usageTo").onchange = refreshUsageRange;
+$("usageToday").onclick = () => { $("usageFrom").value = dayKey(); $("usageTo").value = dayKey(); usageRange = null; refreshUsageRange(); };
+$("usageYesterday").onclick = () => { $("usageFrom").value = dayKey(-1); $("usageTo").value = dayKey(-1); refreshUsageRange(); };
+$("clearUsage").onclick = async () => {
+  if (!window.confirm("Permanently clear website usage history and blocked-attempt counts stored by NORTH on this browser?")) return;
+  const result = await send({ type: "clearUsageHistory" });
+  if (!result?.ok) return;
+  usageRange = null;
+  $("usageFrom").value = dayKey();
+  $("usageTo").value = dayKey();
+  await refresh();
+  await refreshUsageRange();
+};
 $("addBtn").onclick = addSite;
 $("siteInput").addEventListener("keydown", (e) => {
   if (e.key === "Enter") addSite();
 });
+
+async function addUsageLimit() {
+  const result = await send({ type: "addUsageLimit", host: $("limitInput").value, mode: $("limitMode").value,
+    minutes: Number($("limitAmount").value), name: $("limitName").value });
+  if (result?.ok) {
+    $("limitInput").value = "";
+    $("limitName").value = "";
+    $("limitErr").classList.add("hide");
+  } else {
+    $("limitErr").textContent = result?.error || "Could not add that limit";
+    $("limitErr").classList.remove("hide");
+  }
+  await refresh();
+}
+$("addLimitBtn").onclick = addUsageLimit;
+$("limitInput").addEventListener("keydown", (event) => { if (event.key === "Enter") addUsageLimit(); });
+$("limitMode").onchange = () => { $("limitAmount").classList.toggle("hide", $("limitMode").value === "session"); };
 
 // Schedule draft
 const dayRow = $("schedDays");
@@ -262,19 +434,39 @@ $("schedAdd").onclick = async () => {
   }
 };
 
-// Account link
-$("acctSave").onclick = async () => {
-  const res = await send({ type: "linkAccount", un: $("acctInput").value });
-  if (res?.ok) {
-    $("acctInput").value = "";
-    await refresh();
-  } else {
-    $("acctNote").textContent = res?.error || "Could not link that account";
-  }
-};
-$("acctUnlink").onclick = async () => {
-  await send({ type: "unlinkAccount" });
+$("acctSignOut").onclick = async () => {
+  await send({ type: "authSignOut" });
   await refresh();
+};
+async function openNorthFlow({ connect = false } = {}) {
+  const { northWebUrl } = await chrome.storage.local.get("northWebUrl");
+  const tabs = connect ? await chrome.tabs.query({}) : [];
+  const current = connect ? await chrome.tabs.query({ active: true, currentWindow: true }) : [];
+  const pageOrigin = (url) => {
+    try {
+      const origin = new URL(url || "").origin;
+      return ["http://localhost:5173", "http://localhost:5174", "https://north.vercel.app"].includes(origin) ? origin : "";
+    } catch { return ""; }
+  };
+  const activeOrigin = pageOrigin(current[0]?.url);
+  const openNorthTab = [...tabs].filter((tab) => pageOrigin(tab.url)).sort((a, b) => (b.lastAccessed || 0) - (a.lastAccessed || 0))[0];
+  const dashboard = new URL(activeOrigin || pageOrigin(openNorthTab?.url) || northWebUrl || "https://north.vercel.app");
+  dashboard.searchParams.set("tab", "flow");
+  if (connect) {
+    const nonce = crypto.randomUUID();
+    await chrome.storage.local.set({ northConnectPending: { nonce, expiresAt: Date.now() + 5 * 60 * 1000, origin: dashboard.origin } });
+    dashboard.searchParams.set("connectExtension", chrome.runtime.id);
+    dashboard.searchParams.set("connectNonce", nonce);
+  }
+  chrome.tabs.create({ url: dashboard.toString() });
+}
+$("acctConnect").onclick = async () => {
+  await openNorthFlow({ connect: true });
+  window.close();
+};
+$("openNorth").onclick = async () => {
+  await openNorthFlow();
+  window.close();
 };
 
 refresh();

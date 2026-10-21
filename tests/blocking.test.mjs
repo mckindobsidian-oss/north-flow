@@ -27,6 +27,7 @@ import {
   migrateLegacy,
   removeSchedule,
   upsertRule,
+  upsertUsageLimit,
   upsertSchedule,
   rulesByKind,
   describeBlocking,
@@ -156,6 +157,44 @@ test("an always-on rule blocks at any hour, on every client's half", () => {
   assert.deepEqual(v.apps, ["instagram"], "app match key is lowercase");
   assert.deepEqual(v.appLabels, ["Instagram"], "display name preserved");
   assert.equal(v.reasons[state.rules[0].id].reason, "always");
+});
+
+test("a website daily usage cap blocks at its limit and temporary unblocks still win", () => {
+  const state = upsertUsageLimit(defaultBlocking(), { target: "youtube.com", dailyLimitMinutes: 15 });
+  const rule = state.usageLimits[0];
+  assert.deepEqual(evaluateBlocking(state, 1000, { "youtube.com": 899 }).websites, []);
+  const capped = evaluateBlocking(state, 1000, { "youtube.com": 300, "m.youtube.com": 600 });
+  assert.deepEqual(capped.websites, ["youtube.com"]);
+  assert.equal(capped.reasons[rule.id].reason, "daily-limit");
+  assert.deepEqual(evaluateBlocking(unblockUntil(state, rule.id, 5, 1000), 1000, { "youtube.com": 900 }).websites, []);
+});
+
+test("daily usage caps normalize to a safe website-only integer", () => {
+  const state = normalizeState({ rules: [
+    { kind: "website", target: "example.com" },
+  ], usageLimits: [
+    { target: "example.com", dailyLimitMinutes: 9999 },
+    { target: "site.test", dailyLimitMinutes: 0 },
+  ] });
+  assert.equal(state.usageLimits[0].dailyLimitMinutes, 1440);
+  assert.equal(state.usageLimits.length, 1, "invalid limits are dropped");
+  assert.equal("dailyLimitMinutes" in state.rules[0], false);
+});
+
+test("website session allowances wait for the extension's per-tab timer", () => {
+  const state = upsertUsageLimit(defaultBlocking(), { target: "youtube.com", mode: "session", name: "Short visits" });
+  assert.equal(state.usageLimits[0].name, "Short visits");
+  assert.equal(state.usageLimits[0].mode, "session");
+  assert.deepEqual(evaluateBlocking(state, MON, { "youtube.com": 10_000 }).websites, [],
+    "daily usage must not accidentally consume a per-visit allowance");
+});
+
+test("daily application caps use app usage and yield to temporary unblocks", () => {
+  const state = upsertUsageLimit(defaultBlocking(), { kind: "app", target: "Steam", dailyLimitMinutes: 30 });
+  const limit = state.usageLimits[0];
+  assert.deepEqual(evaluateBlocking(state, MON, {}, { steam: 1799 }).apps, []);
+  assert.deepEqual(evaluateBlocking(state, MON, {}, { Steam: 1800 }).apps, ["steam"]);
+  assert.deepEqual(evaluateBlocking(unblockUntil(state, limit.id, 5, MON), MON, {}, { Steam: 1800 }).apps, []);
 });
 
 test("a focus rule blocks only while a session is running", () => {

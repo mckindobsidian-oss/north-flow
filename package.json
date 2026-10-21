@@ -1,6 +1,7 @@
 {
   "name": "north",
   "private": true,
+  "type": "module",
   "version": "0.2.0",
   "description": "NORTH — an Apple-themed productivity ecosystem: web, browser extension, desktop and mobile clients sharing one account model and one blocking engine.",
   "scripts": {
@@ -12,6 +13,11 @@
     "check:shared": "node scripts/sync-shared.mjs --check",
     "check:jsx": "node scripts/check-jsx.mjs",
     "test": "node --test tests/*.test.mjs",
-    "verify:rls": "node scripts/verify-rls.mjs"
+    "verify:rls": "node scripts/verify-rls.mjs",
+    "audit:responsive": "node scripts/audit-responsive.mjs",
+    "verify:extension": "node scripts/verify-extension.mjs"
+  },
+  "devDependencies": {
+    "supabase": "^2.118.0"
   }
 }

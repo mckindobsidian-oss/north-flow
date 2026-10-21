@@ -23,30 +23,49 @@ const { createServer } = await import(pathToFileURL(requireFromApp.resolve("vite
 
 const FILES = [
   "react-app/src/focusly.jsx",
+  "react-app/src/FocusTaskPicker.jsx",
   "react-app/src/entry.jsx",
   "react-app/src/preview.jsx",
   "react-app/src/lib/supabase.js",
+  "react-app/src/lib/auth-events.js",
   "react-app/src/lib/sync.js",
   "react-app/src/lib/sync-map.js",
   "react-app/src/shared/blocking.js",
   "react-app/src/shared/account.js",
   "apps/mobile/App.jsx",
+  "apps/mobile/AuthScreen.jsx",
+  "apps/mobile/lib/auth.js",
+  "apps/mobile/lib/supabase.js",
   "apps/mobile/shared/blocking.js",
   "apps/mobile/shared/account.js",
   "apps/desktop/dist/app.js",
+  "apps/desktop/dist/north-auth.js",
   "apps/extension/background.js",
   "apps/extension/popup.js",
+  "apps/extension/blocked.js",
   "apps/extension/lib/blocking.js",
+  "apps/extension/lib/account.js",
+  "apps/extension/lib/goTrue.js",
+  "apps/extension/lib/north-auth.js",
+  "apps/extension/lib/dnr.js",
+  "apps/extension/lib/account-merge.js",
+  "apps/extension/lib/external.js",
+  "apps/extension/lib/usage.js",
+  "apps/extension/lib/block-reason.js",
   "packages/shared-types/blocking.js",
   "packages/shared-types/account.js",
   "scripts/sync-shared.mjs",
   "scripts/verify-rls.mjs",
+  "scripts/verify-extension.mjs",
 ];
 
 // Native-only modules are not installed here (see scripts/stubs/native-stub.js);
 // aliasing them lets the phone's JSX be parsed without pulling in an SDK.
 const stub = resolve(ROOT, "scripts", "stubs", "native-stub.js");
 
+// Mobile-only imports that don't exist at check time: the optional
+// AsyncStorage peer and supabase-js (installed under react-app, not at the
+// root for the phone). Both resolve to the stub — parse-only is the point.
 const server = await createServer({
   root: ROOT,
   configFile: false,
@@ -58,6 +77,10 @@ const server = await createServer({
       "react-native": stub,
       "expo-status-bar": stub,
       "@expo/vector-icons": stub,
+      "@react-native-async-storage/async-storage": stub,
+      "@supabase/supabase-js": stub,
+      // The mobile auth glue imports the web client's sync engine directly.
+      "../../react-app/src/lib/sync.js": resolve(ROOT, "react-app", "src", "lib", "sync.js"),
     },
   },
 });

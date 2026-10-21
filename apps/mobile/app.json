@@ -6,6 +6,7 @@
     "orientation": "portrait",
     "userInterfaceStyle": "automatic",
     "newArchEnabled": true,
+    "scheme": "north",
     "ios": {
       "supportsTablet": true,
       "bundleIdentifier": "com.north.mobile"
@@ -13,6 +14,14 @@
     "android": {
       "package": "com.north.mobile",
       "edgeToEdgeEnabled": true
+    },
+    "extra": {
+      "google": {
+        "comment": "Public OAuth client IDs for native sign-in (no client secret ships with the app). The redirect runs through Supabase's auth server; paste the three IDs from Google Cloud Console (SETUP.md §1c).",
+        "clientIdIos": "",
+        "clientIdAndroid": "",
+        "clientIdWeb": ""
+      }
     }
   }
 }

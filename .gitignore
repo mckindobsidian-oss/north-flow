@@ -11,6 +11,8 @@ web-build/
 .freebuff/*.log
 .freebuff/*.log.err
 .freebuff/preview-*
+supabase/.temp/
+*.log
 
 # OS / editor
 .DS_Store

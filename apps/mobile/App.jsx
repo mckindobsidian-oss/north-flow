@@ -22,7 +22,7 @@
  *    installed them. State therefore lives for the session only, and the UI
  *    says so instead of implying it was saved.
  */
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
   SafeAreaView, ScrollView, StyleSheet, Text, TextInput, TouchableOpacity,
   View, useColorScheme,
@@ -37,22 +37,25 @@ import {
   evaluateBlocking, describeBlocking, rulesByKind, RULE_WHEN_LABEL,
   WEEKDAY_LABELS, WORKDAYS,
 } from "./shared/blocking.js";
+import {
+  restoreSession, signOut as authSignOut, onAuthChange, S, SYNC, sessionsPersist, newUuid,
+} from "./lib/auth.js";
+import { PROFILE_KEY } from "./shared/account.js";
+import AuthScreen from "./AuthScreen.jsx";
 
 const TABS = [
   { id: "home", icon: "home-outline", label: "Home" },
   { id: "focus", icon: "timer-outline", label: "Focus" },
   { id: "tasks", icon: "checkbox-outline", label: "Tasks" },
-  { id: "boards", icon: "grid-outline", label: "Boards" },
-  { id: "calendar", icon: "calendar-outline", label: "Cal" },
-  { id: "block", icon: "shield-outline", label: "Block" },
+  { id: "calendar", icon: "calendar-outline", label: "Calendar" },
+  { id: "block", icon: "shield-outline", label: "Guard" },
   { id: "social", icon: "people-outline", label: "Social" },
 ];
 
 /** Screens that still need the shared backend / a native module, stated plainly. */
 const NOTES = {
   home: "Dashboard with today's stats and your activity heatmap. It fills in once the shared NORTH account is reachable from the phone (Supabase phase, SETUP.md).",
-  tasks: "Tasks and kanban boards share one store with the web app; wiring this screen to that store is the next step for the mobile client.",
-  boards: "Kanban boards (To do / Doing / Done) — the same cards as Tasks.",
+  tasks: "Tasks use the same account record as the web app and sync when this device is signed in.",
   calendar: "Personal calendar. Real Google Calendar sync needs the OAuth phase (SETUP.md).",
   social: "Leaderboard and friends — server-backed so stats cannot be faked. Arrives with the Supabase phase.",
 };
@@ -61,12 +64,76 @@ export default function App() {
   const scheme = useColorScheme(); // Apple-style: follows the device, no toggle
   const dark = scheme === "dark";
   const [tab, setTab] = useState("home");
-  // The blocking model lives here while the app is open (see the file header for
-  // why it is not persisted yet) and is shared with every other client.
-  const [blocking, setBlocking] = useState(() => normalizeState(defaultBlocking()));
+  // Auth: restored from the persisted Supabase session (or the device record
+  // when no account service is configured) before the UI is shown.
+  const [booting, setBooting] = useState(true);
+  const [user, setUser] = useState(null);
+  // The blocking model comes from the account profile (`u:<un>.blocking`) —
+  // the SAME document the web app edits — so the phone shows the account's
+  // rules, not a second copy. Edits here write back through S.* and sync.
+  const [blocking, setBlockingState] = useState(() => normalizeState(defaultBlocking()));
+  const userRef = useRef(null); userRef.current = user;
+  const setBlocking = (next) => {
+    const model = typeof next === "function" ? next(blocking) : next;
+    setBlockingState(normalizeState(model));
+    const un = userRef.current?.un;
+    if (un) {
+      S.get(PROFILE_KEY(un)).then((raw) => {
+        if (raw) S.set(PROFILE_KEY(un), { ...raw, blocking: normalizeState(model) });
+      });
+    }
+  };
+  // The profile record re-reads after every sync pull so Home/Tasks show the
+  // account's real tasks and stats, not a boot-time snapshot.
+  const [profile, setProfile] = useState(null);
+  const reloadProfile = () => {
+    const un = userRef.current?.un;
+    if (!un) return setProfile(null);
+    S.get(PROFILE_KEY(un)).then((raw) => setProfile(raw || null));
+  };
+  useEffect(() => { reloadProfile(); }, [user?.un]);
+
+  useEffect(() => {
+    let dead = false;
+    restoreSession()
+      .then((u) => { if (!dead) setUser(u); })
+      .catch(() => {})
+      .finally(() => { if (!dead) setBooting(false); });
+    const unsub = onAuthChange((u) => { if (!dead) setUser(u); });
+    return () => { dead = true; unsub(); };
+  }, []);
+
+  // Adopt the account's blocking document whenever the profile changes.
+  useEffect(() => {
+    if (profile?.blocking) setBlockingState(normalizeState(profile.blocking));
+  }, [profile?.blocking]);
+
+  // A quiet refresh loop: signed-in devices re-pull periodically so edits
+  // made elsewhere appear without a restart (the web app pushes on write;
+  // this client keeps it simple and pulls).
+  useEffect(() => {
+    if (!user?.authLinked) return;
+    const id = setInterval(() => {
+      SYNC.pull().then(reloadProfile).catch(() => {});
+    }, 60000);
+    return () => clearInterval(id);
+  }, [user?.authLinked, user?.un]);
 
   const s = styles(dark);
   const cur = TABS.find((t) => t.id === tab);
+
+  if (booting) {
+    return (
+      <SafeAreaView style={[s.root, { alignItems: "center", justifyContent: "center" }]}>
+        <StatusBar style={dark ? "light" : "dark"} />
+        <Ionicons name="compass" size={36} color="#007AFF" />
+      </SafeAreaView>
+    );
+  }
+
+  if (!user) {
+    return <AuthScreen dark={dark} onAuthed={(u) => setUser(u)} />;
+  }
 
   return (
     <SafeAreaView style={s.root}>
@@ -74,7 +141,10 @@ export default function App() {
       <View style={s.header}>
         <View style={s.logo}><Text style={{ color: "#fff", fontSize: 14, fontWeight: "800" }}>⚡</Text></View>
         <Text style={s.title}>NORTH</Text>
-        <Text style={s.name}>Aarav</Text>
+        <TouchableOpacity onPress={() => authSignOut().then(() => setUser(null))}
+          accessibilityRole="button" accessibilityLabel={`Signed in as ${user.name || user.un}. Sign out`}>
+          <Text style={s.name}>{user.name || user.un} · Sign out</Text>
+        </TouchableOpacity>
       </View>
 
       {tab === "block" ? (
@@ -82,7 +152,11 @@ export default function App() {
       ) : (
         <ScrollView contentContainerStyle={s.body}>
           <Text style={s.h2}>{cur.label}</Text>
-          {tab === "focus" ? (
+          {tab === "home" ? (
+            <Home dark={dark} s={s} profile={profile} go={setTab} />
+          ) : tab === "tasks" ? (
+            <Tasks dark={dark} s={s} user={user} profile={profile} onChanged={reloadProfile} />
+          ) : tab === "focus" ? (
             <>
               <View style={s.card}>
                 <Ionicons name="timer-outline" size={22} color="#007AFF" />
@@ -103,8 +177,10 @@ export default function App() {
             </View>
           )}
           <Text style={s.muted}>
-            This Expo shell mirrors the web app's tabs and shares its data model —
-            including the blocking model it configures on the Block screen.
+            {user.authLinked
+              ? `Signed in as ${user.email || user.un}${sessionsPersist ? " — your session and data persist on this device." : " — install @react-native-async-storage/async-storage so your session and data survive restarts."}`
+              : "No account service configured — this device keeps data locally for now."}
+            {" "}This shell mirrors the web app's tabs and shares its data model.
           </Text>
         </ScrollView>
       )}
@@ -121,6 +197,95 @@ export default function App() {
         ))}
       </View>
     </SafeAreaView>
+  );
+}
+
+// ══════════════════════════════════════════════════════════════════════════
+// HOME — real numbers from the account's profile document
+// ══════════════════════════════════════════════════════════════════════════
+function Home({ dark, s, profile, go }) {
+  const tasks = profile?.tasks || [];
+  const done = tasks.filter((t) => t.completed).length;
+  const open = tasks.length - done;
+  return (
+    <>
+      <View style={s.card}>
+        <Text style={s.cardTitle}>Today</Text>
+        <Text style={s.muted}>
+          {tasks.length
+            ? `${done} of ${tasks.length} tasks done · ${open} open`
+            : "No tasks yet — add them on the Tasks tab (they sync with web)."}
+        </Text>
+      </View>
+      <TouchableOpacity style={s.primary} onPress={() => go("tasks")} accessibilityRole="button">
+        <Text style={s.primaryText}>Open tasks</Text>
+      </TouchableOpacity>
+    </>
+  );
+}
+
+// ══════════════════════════════════════════════════════════════════════════
+// TASKS — the account's real task list, edited through the same S.* boundary
+// ══════════════════════════════════════════════════════════════════════════
+function Tasks({ dark, s, user, profile, onChanged }) {
+  const [draft, setDraft] = useState("");
+  const [err, setErr] = useState("");
+  const tasks = profile?.tasks || [];
+
+  const persist = async (upd) => {
+    const raw = await S.get(PROFILE_KEY(user.un));
+    if (!raw) return;
+    await S.set(PROFILE_KEY(user.un), { ...raw, tasks: upd });
+    onChanged();
+  };
+
+  const add = async () => {
+    const title = draft.trim();
+    if (!title) return;
+    if (!user?.un) return setErr("Sign in first.");
+    await persist([...tasks, { id: newUuid(), title, completed: false, at: Date.now(), pri: "medium", cat: "Personal" }]);
+    setDraft("");
+    setErr("");
+  };
+
+  const toggle = (t) => persist(tasks.map((x) => (x.id === t.id ? { ...x, completed: !x.completed } : x)));
+  const remove = (t) => persist(tasks.filter((x) => x.id !== t.id));
+
+  return (
+    <>
+      <View style={s.card}>
+        <View style={{ flexDirection: "row", gap: 8 }}>
+          <TextInput style={[s.input, { flex: 1 }]} placeholder="Add a task…"
+            placeholderTextColor={dark ? "#636366" : "#AFAFB6"}
+            value={draft} onChangeText={setDraft} onSubmitEditing={add} returnKeyType="done" />
+          <TouchableOpacity style={s.primary} onPress={add} accessibilityRole="button" accessibilityLabel="Add task">
+            <Text style={s.primaryText}>Add</Text>
+          </TouchableOpacity>
+        </View>
+        {err ? <Text style={[s.muted, { color: "#FF3B30", marginTop: 6 }]}>{err}</Text> : null}
+        {tasks.length === 0 ? (
+          <Text style={s.muted}>Nothing yet. Tasks here are the same list the web app shows.</Text>
+        ) : (
+          tasks.map((t) => (
+            <View key={t.id} style={{ flexDirection: "row", alignItems: "center", gap: 8, paddingVertical: 7, borderTopWidth: StyleSheet.hairlineWidth, borderTopColor: dark ? "#38383A" : "#E2E3E9" }}>
+              <TouchableOpacity onPress={() => toggle(t)} accessibilityRole="checkbox" accessibilityState={{ checked: Boolean(t.completed) }}
+                accessibilityLabel={`${t.completed ? "Mark incomplete" : "Complete"} ${t.title}`}>
+                <Ionicons name={t.completed ? "checkmark-circle" : "ellipse-outline"} size={20} color={t.completed ? "#34C759" : "#007AFF"} />
+              </TouchableOpacity>
+              <Text style={{ flex: 1, fontSize: 14, color: dark ? "#F2F2F7" : "#1C1C1E", textDecorationLine: t.completed ? "line-through" : "none" }} numberOfLines={2}>
+                {t.title}
+              </Text>
+              <TouchableOpacity onPress={() => remove(t)} accessibilityRole="button" accessibilityLabel={`Delete ${t.title}`}>
+                <Ionicons name="close-circle-outline" size={18} color={dark ? "#636366" : "#AFAFB6"} />
+              </TouchableOpacity>
+            </View>
+          ))
+        )}
+      </View>
+      <Text style={s.muted}>
+        Editing here writes the same profile record the web app reads; the next sync pushes it to your account.
+      </Text>
+    </>
   );
 }
 
@@ -307,6 +472,18 @@ function Blocking({ dark, s, blocking, setBlocking }) {
         {grouped.apps.length === 0
           ? <Text style={s.muted}>No applications yet</Text>
           : grouped.apps.map((r) => <RuleRow key={r.id} rule={r} />)}
+      </Section>
+
+      {/* Limits use the same account-owned blocking document as web and desktop. */}
+      <Section title="SHARED LIMITS" note="These limits sync with your North account. Website limits are enforced by the browser extension; desktop app limits by the desktop client. Android currently displays shared limits but does not enforce screen-time caps.">
+        {blocking.usageLimits.length === 0
+          ? <Text style={s.muted}>No shared limits are set.</Text>
+          : blocking.usageLimits.map((limit) => (
+            <View key={limit.id} style={{ paddingVertical: 7, borderBottomWidth: 1, borderBottomColor: dark ? "#38383A" : "#E5E5EA" }}>
+              <Text style={s.ruleTitle}>{limit.name ? `${limit.name} · ` : ""}{limit.target}</Text>
+              <Text style={s.muted}>{limit.mode === "session" ? "Per-visit allowance" : `Daily allowance · ${limit.dailyLimitMinutes} min`}{limit.enabled === false ? " · Off" : ""}</Text>
+            </View>
+          ))}
       </Section>
 
       {/* Schedules */}

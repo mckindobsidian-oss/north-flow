@@ -1,0 +1,37 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Choose a North Flow session</title>
+  <style>
+    * { box-sizing:border-box }
+    body { margin:0; min-height:100vh; display:grid; place-items:center; padding:24px; color:#f6f7ff; font:16px/1.5 system-ui,sans-serif; background:radial-gradient(ellipse at 20% 0%,#6964bb88,transparent 55%),linear-gradient(145deg,#111d3c,#292d59 55%,#18394c) }
+    main { width:min(480px,100%); padding:26px; border:1px solid #ffffff45; border-radius:22px; background:#ffffff15; box-shadow:inset 0 1px #ffffff35,0 24px 70px #05091588; backdrop-filter:blur(24px) }
+    h1 { margin:0 0 6px; font-size:22px; letter-spacing:-.3px }
+    p { margin:0; color:#e0e5f7; font-size:14px }
+    #domain { color:#fff; font-weight:650; overflow-wrap:anywhere }
+    .choices { display:grid; grid-template-columns:repeat(3,1fr); gap:9px; margin-top:22px }
+    button { min-height:46px; border:1px solid #ffffff55; border-radius:13px; color:white; font:650 14px system-ui,sans-serif; background:#ffffff1d; cursor:pointer; box-shadow:inset 0 1px #ffffff28,0 5px 14px #080f2b33 }
+    button:hover { transform:translateY(-1px); background:#ffffff2c }
+    .custom { display:flex; gap:8px; margin-top:11px }
+    input { min-width:0; flex:1; padding:0 12px; border:1px solid #ffffff44; border-radius:12px; color:white; background:#10172d88; font:14px system-ui }
+    input::placeholder { color:#c6cce0 }
+    #error { min-height:20px; margin-top:10px; color:#ffaaa7; font-size:12px }
+    @media (max-width:400px) { .choices { grid-template-columns:repeat(2,1fr) } }
+  </style>
+</head>
+<body>
+  <main>
+    <h1 id="title">Choose your session</h1>
+    <p id="message">How long do you want to spend on <span id="domain"></span> this visit?</p>
+    <div class="choices" id="choices"></div>
+    <form class="custom" id="customForm">
+      <input id="customMinutes" type="number" min="1" max="240" placeholder="Custom minutes (1–240)" aria-label="Custom session length in minutes" />
+      <button type="submit">Start</button>
+    </form>
+    <div id="error" role="alert"></div>
+  </main>
+  <script type="module" src="session-limit.js"></script>
+</body>
+</html>
