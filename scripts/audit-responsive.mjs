@@ -32,7 +32,7 @@
  * and kills it on exit. Point `CHROME=/path/to/chrome` at a specific binary.
  */
 import { spawn, execSync } from "node:child_process";
-import { existsSync } from "node:fs";
+import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
 // ── the matrix ────────────────────────────────────────────────────────────
@@ -59,8 +59,9 @@ const VIEWPORTS = [
 const TABS = ["Home", "Focus", "Tasks", "Calendar", "Flow", "Social", "Settings"];
 
 const argv = process.argv.slice(2);
+const selectedViewports = argv.includes("--quick") ? VIEWPORTS.filter(([, width]) => width === 390 || width === 820) : VIEWPORTS;
 const argOf = (name) => argv.find((a) => a.startsWith(`--${name}=`))?.split("=").slice(1).join("=");
-const APP_URL = (argOf("url") || process.env.NORTH_URL || "http://localhost:5174/preview.html").replace(/\/+$/, "");
+const APP_URL = (argOf("url") || process.env.NORTH_URL || "http://127.0.0.1:5174/preview.html").replace(/\/+$/, "");
 const ENDPOINT = (argOf("cdp") || process.env.NORTH_CDP || "http://127.0.0.1:9222").replace(/\/+$/, "");
 const PORT = Number(new URL(ENDPOINT).port) || 9222;
 
@@ -134,7 +135,7 @@ async function launch(endpoint, port) {
     "--headless=new", "--no-first-run", "--no-default-browser-check", "--disable-gpu",
     "--window-size=1280,800",
     "about:blank",
-  ], { stdio: "ignore" });
+  ], { stdio: "ignore", windowsHide: true });
   const reachable = async () => { try { await getJson(`${endpoint}/json/version`); return true; } catch { return false; } };
   for (let i = 0; i < 80 && !(await reachable()); i++) await sleep(250);
   if (!(await reachable())) throw new Error("the browser never opened its debugging port");
@@ -273,10 +274,13 @@ async function main() {
   const c = await connect(tab.webSocketDebuggerUrl);
   await c.send("Page.enable");
   await c.send("Runtime.enable");
-  await sleep(2500); // first paint + the preview harness signing itself in
+  // Cold Vite transforms and account restoration take longer than a fixed
+  // paint delay. Wait for navigation before measuring the first viewport.
+  const readyUntil = Date.now() + 30000;
+  while (Date.now() < readyUntil && !(await c.evaluate("return Boolean(document.querySelector('.north-nav-item'));"))) await sleep(250);
 
-  console.log(`\nAuditing ${APP_URL} — ${VIEWPORTS.length} viewports × ${TABS.length} screens\n`);
-  for (const [group, width, height] of VIEWPORTS) {
+  console.log(`\nAuditing ${APP_URL} — ${selectedViewports.length} viewports × ${TABS.length} screens\n`);
+  for (const [group, width, height] of selectedViewports) {
     await c.send("Emulation.setDeviceMetricsOverride", {
       width, height, deviceScaleFactor: 1, mobile: width <= 820, screenWidth: width, screenHeight: height,
     });
@@ -295,6 +299,19 @@ async function main() {
       console.log(` FAIL  ${label}`);
       for (const p of problems) console.log(`         ${p}`);
     }
+    if (argOf("screenshots") && [390, 820, 1440].includes(width)) {
+      const dir = argOf("screenshots");
+      mkdirSync(dir, { recursive: true });
+      for (const screen of ["Focus", "Tasks", "Calendar", "Flow", "Settings"]) {
+        await c.evaluate(`
+          [...document.querySelectorAll('.north-nav-item')].find((button) => button.textContent.trim() === ${JSON.stringify(screen)})?.click();
+          await new Promise((resolve) => setTimeout(resolve, 600));
+          window.scrollTo(0, 0);
+        `);
+        const screenshot = await c.send("Page.captureScreenshot", { format: "png" });
+        writeFileSync(join(dir, `${screen.toLowerCase()}-${width}.png`), Buffer.from(screenshot.data, "base64"));
+      }
+    }
   }
 
   await c.send("Emulation.clearDeviceMetricsOverride").catch(() => {});
@@ -303,7 +320,7 @@ async function main() {
   if (launched) await launched.stop();
 
   console.log(failures === 0
-    ? `\nAll ${VIEWPORTS.length} viewports clean.\n`
+    ? `\nAll ${selectedViewports.length} viewports clean.\n`
     : `\n${failures} viewport(s) with problems.\n`);
   process.exit(failures === 0 ? 0 : 1);
 }

@@ -42,6 +42,7 @@ import {
 } from "./lib/auth.js";
 import { PROFILE_KEY } from "./shared/account.js";
 import AuthScreen from "./AuthScreen.jsx";
+import MobileMain from "./MobileMain.jsx";
 
 const TABS = [
   { id: "home", icon: "home-outline", label: "Home" },
@@ -134,6 +135,8 @@ export default function App() {
   if (!user) {
     return <AuthScreen dark={dark} onAuthed={(u) => setUser(u)} />;
   }
+
+  return <MobileMain key={user.id || user.un} user={user} onLogout={async () => { await authSignOut(); setUser(null); }} />;
 
   return (
     <SafeAreaView style={s.root}>

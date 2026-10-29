@@ -1,5 +1,11 @@
 # NORTH architecture
 
+## Android native client (2026-10-24)
+
+`apps/mobile/index.js` selects `MobileRoot` (auth) and `MobileMain` (native React Native screens), sharing the existing account, blocking, usage-merge, date and streak helpers. The injected shared sync engine uses AsyncStorage for account data/offline mutations and SecureStore for Supabase PKCE sessions. No remote website is embedded.
+
+The local Expo `north-device` Kotlin module owns Android UsageEvents foreground sampling, overlay enforcement, optional address-bar AccessibilityService and optional split-route DNS VpnService. A visible foreground notification accompanies monitoring. Only screen-on/unlocked observed seconds are counted; website attribution replaces browser-app attribution. Owner-scoped cumulative counters upload with the existing `(user_id, day, kind, name, device_id)` conflict key and `source=mobile`. Rules are cached and refreshed every 30 seconds; background credentials are encrypted by Android KeyStore. Shared limits are eventually consistent across devices, including offline overshoot, not a transactional quota reservation.
+
 This document describes the implementation observed in the repository on 2026-10-16. It is the maintained architecture record; detailed setup guides remain useful reference material but do not override the decisions log.
 
 ## System shape
@@ -21,7 +27,7 @@ The product is local-first: clients render from local state, then synchronize ac
 |---|---|---|
 | Web | React 19 + Vite in `react-app/`; primary UI in `src/focusly.jsx`; Supabase connector in `src/lib/` | Implemented; build and automated checks passed on 2026-10-16. |
 | Browser extension | Manifest V3 in `apps/extension/`; `declarativeNetRequest`, alarms, local usage accounting, GoTrue REST auth | Implemented; account session is adopted from the signed-in North website through nonce-bound pairing. A real browser run is still needed. |
-| Desktop | Tauri 2 shell plus Rust process monitor in `apps/desktop/src-tauri/` | Implemented locally; build/run not verified in this environment. It persists rules locally and does not yet synchronize with Supabase. |
+| Desktop | Bundled React product UI plus Tauri 2 Rust process monitor | Uses the website account/sync layer and a native bridge for rules and foreground app usage. Native build/runtime verification is in progress; see the latest progress entry. |
 | Mobile | Expo / React Native in `apps/mobile/`; email/password auth, storage adapter, shared rule engine | Partially implemented; native build and device behavior unverified. iOS and Android enforcement need native entitlement/permission work. |
 | Cloud | Supabase schema, RLS checks, migrations, Calendar and Spotify Edge Functions in `supabase/` | Implemented in source; deployment and live integration verification are environment-dependent. |
 
@@ -39,7 +45,7 @@ Board/kanban fields and screens still exist in code and schema compatibility pat
 |---|---|---|
 | Rules, schedules, and focus window | Account/profile settings when sync is available | Each client evaluates the same model. |
 | Website blocking | Shared website rules | Chromium extension via dynamic `declarativeNetRequest`. |
-| Desktop app rules | Shared shape, currently local desktop file | Tauri Rust process scan/termination; it cannot prevent launch. |
+| Desktop app rules | Account blocking document, cached in a local desktop file | Tauri Rust process scan/termination; it cannot prevent launch. |
 | Mobile limits | Shared shape/UI only | Blocked pending iOS Screen Time/FamilyControls and Android UsageStats/native implementation. |
 | Temporary unblock | Device-local expiry | The current device only; intentionally not synced. |
 

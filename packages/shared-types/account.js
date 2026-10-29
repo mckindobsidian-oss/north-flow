@@ -32,7 +32,7 @@ export const PROFILE_KEY = (un) => `u:${un}`;
  * clients keep their local choice rather than rendering something unknown.
  */
 export const THEME_IDS = ["event-horizon", "violet-dusk", "obsidian-flow", "ember-horizon", "monochrome-terrain", "prism-horizon", "sculpted-bronze", "luminous-violet"];
-export const DEFAULT_THEME_ID = "sculpted-bronze";
+export const DEFAULT_THEME_ID = "violet-dusk";
 /** True when the id is one this build actually knows how to render. */
 export const isKnownTheme = (id) =>
   typeof id === "string" && THEME_IDS.includes(id);

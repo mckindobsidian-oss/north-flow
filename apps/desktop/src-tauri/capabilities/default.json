@@ -1,0 +1,7 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "main-window",
+  "description": "Core APIs for the locally bundled North interface.",
+  "windows": ["main"],
+  "permissions": ["core:default"]
+}

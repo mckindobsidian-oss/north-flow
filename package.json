@@ -6,6 +6,8 @@
   "description": "NORTH — an Apple-themed productivity ecosystem: web, browser extension, desktop and mobile clients sharing one account model and one blocking engine.",
   "scripts": {
     "dev": "npm --prefix react-app run dev -- --config vite.preview.config.js",
+    "desktop:dev": "npm --prefix apps/desktop run tauri -- dev",
+    "desktop:build": "npm --prefix apps/desktop run tauri -- build",
     "build": "npm --prefix react-app run build",
     "lint": "npm --prefix react-app run lint",
     "preview": "npm --prefix react-app run preview",

@@ -289,6 +289,12 @@ The SQL editor runs these idempotent files, in this order:
    field keeps syncing, and the two extras simply stay on the device that
    typed them. Until it is applied, a task's **difficulty and description
    never reach another device**.
+7. `supabase/migrations/20261021190000_usage_device_sources.sql` — adds a
+   stable collector id to usage rows and changes the unique key so extension
+   and desktop totals from multiple devices can coexist. Existing rows are
+   retained as the `legacy` source. It is applied to the current North project;
+   apply it to another project before enabling additive multi-device usage
+   there. Clients fall back to the old four-column shape until it is applied.
 
 Every migration is written to be safely re-runnable (`IF NOT EXISTS`, `DROP
 CONSTRAINT IF EXISTS`), so applying one twice is a no-op rather than an error.
@@ -335,3 +341,9 @@ missing backend row or column exists.
 
 `service_role` key · Google Client Secret · database passwords · any `.env` file
 The repo's `.gitignore` already excludes `.env*`.
+## Friends database update — 2026-10-24
+
+The existing project is missing its social RPCs. Run the complete contents of `supabase/migrations/20261023160011_secure_social_requests.sql` in the SQL Editor of your existing Supabase project, then refresh North. This additive/idempotent update preserves existing rows and restricts friendship mutations to authenticated ownership-checked request/accept/reject/remove functions. It also enables incoming/outgoing request lists and accepted-friend stats.
+
+The connected migration tool returned `Invalid or expired requestState` twice, so this update has **not** been applied remotely. Reconnect that connector before asking an agent to apply it, or use the SQL Editor directly. No new Supabase project or Google OAuth configuration is needed for this change.
+

@@ -1,0 +1,4 @@
+<resources>
+  <string name="north_browser_access_name">North browser limits</string>
+  <string name="north_browser_access_description">Reads only the address-bar hostname in supported browsers for foreground website time and blocking. Paths, passwords and page contents are not collected. Start or stop monitoring in North.</string>
+</resources>

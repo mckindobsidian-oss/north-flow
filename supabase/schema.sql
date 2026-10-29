@@ -53,6 +53,7 @@ create table if not exists public.profiles (
   un                 text not null,
   name               text not null default '',
   email              text,
+  onboarding_complete boolean not null default false,
   created_at         timestamptz not null default now(),
   updated_at         timestamptz not null default now(),
   -- Pomodoro + blocking preferences, shaped exactly like the client model.
@@ -226,8 +227,11 @@ create table if not exists public.usage_records (
   kind         text not null check (kind in ('website', 'app')),
   name         text not null,        -- domain or application name — never a path
   seconds      integer not null default 0 check (seconds >= 0),
+  device_id    text not null default 'legacy',
+  source       text not null default 'legacy' check (source in ('extension', 'desktop', 'mobile', 'legacy')),
+  hourly       jsonb not null default '{}'::jsonb,
   updated_at   timestamptz not null default now(),
-  unique (user_id, day, kind, name)
+  unique (user_id, day, kind, name, device_id)
 );
 create index if not exists usage_records_user_day_idx on public.usage_records (user_id, day desc);
 

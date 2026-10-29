@@ -101,9 +101,10 @@
     .usage-range input { margin-top:4px; padding:7px 8px; color-scheme:dark; }
     .usage-quick { display:flex; gap:6px; margin-bottom:7px; }
   </style>
+  <link rel="stylesheet" href="popup.css" />
 </head>
 <body>
-  <h1><img src="north-logo.png" alt="" width="22" height="22" style="vertical-align:-5px;object-fit:contain;margin-right:5px"> NORTH Flow <span class="acct" id="acctLabel">This device</span><button class="chip ghost" id="openNorth">Open Flow</button></h1>
+    <h1><img src="north-logo.png" alt="" width="22" height="22" style="vertical-align:-5px;object-fit:contain;margin-right:5px"> NORTH Flow <span class="acct" id="acctLabel">This device</span><button class="chip ghost" id="openNorth">Open Flow</button></h1>
 
   <!-- What is enforced right now, from the shared engine -->
   <div class="card">
@@ -117,7 +118,8 @@
     </div>
   </div>
 
-  <div class="tabbar" role="tablist" aria-label="Flow overview">
+    <div class="row"><strong>Flow activity</strong><span class="spacer"></span><button class="chip ghost" id="refreshNorth" aria-label="Refresh sync">↻ Refresh sync</button></div>
+    <div class="tabbar" role="tablist" aria-label="Flow overview">
     <button id="statsTab" role="tab" aria-selected="true" aria-controls="statsPane">Usage</button>
     <button id="limitsTab" role="tab" aria-selected="false" aria-controls="limitsPane">Limits</button>
   </div>
@@ -132,7 +134,7 @@
     </div>
   </div>
   <div class="card">
-    <div class="sec">Website usage <span class="spacer"></span><span class="muted" id="usageCount">0 sites</span></div>
+    <div class="sec">Browsing <span class="spacer"></span><span class="muted" id="usageCount">0 items</span></div>
     <div class="usage-range">
       <label>From<input id="usageFrom" type="date" aria-label="Usage start date" /></label>
       <label>To<input id="usageTo" type="date" aria-label="Usage end date" /></label>
@@ -148,12 +150,17 @@
       Also count audible background tabs
     </label>
   </div>
+  <div class="card">
+    <div class="sec">Desktop activity <span class="spacer"></span><span class="muted">Today</span></div>
+    <ul id="desktopUsageList"></ul>
+    <div class="muted" id="desktopUsageNote"></div>
+  </div>
   </section>
 
   <section id="limitsPane" class="hide" role="tabpanel" aria-labelledby="limitsTab">
   <div class="card">
-    <div class="sec">Website limits <span class="spacer"></span><span class="muted" id="limitsSyncStatus">This browser only</span></div>
-    <div class="muted" style="margin-bottom:7px">Manage limits in North Flow. This extension enforces them in this browser.</div>
+    <div class="sec">Usage limits <span class="spacer"></span><span class="muted" id="limitsSyncStatus">On this device</span></div>
+    <div class="muted" style="margin-bottom:7px">Your limits from North Flow.</div>
     <div class="row">
       <input id="limitInput" list="visitedSites" placeholder="Choose or enter a website" aria-label="Website for a usage limit" />
       <datalist id="visitedSites"></datalist>
@@ -230,6 +237,7 @@
       <button class="chip primary" id="acctConnect">Connect to North</button>
     </div>
     <div id="acctLinked">
+      <div class="muted" id="focusRank" style="margin-bottom:10px"></div>
       <div class="muted" id="acctNote"></div>
       <div class="row"><button class="chip ghost" id="acctSignOut">Sign out</button></div>
     </div>

@@ -11,11 +11,15 @@
  * page existed; this is the explanation, not the enforcement.
  */
 import { parseBlockParams, describeBlock } from "./lib/block-reason.js";
+import { applyTheme } from "./lib/appearance.js";
+import { isTrustedOrigin } from "./lib/external.js";
 
 const $ = (id) => document.getElementById(id);
+applyTheme();
+chrome.storage.local.get(["northThemeId", "northAppearance"]).then(({ northThemeId, northAppearance }) => applyTheme(northThemeId, northAppearance)).catch(() => {});
 
 /** Where "Open North Flow" goes. Stored by the popup's project settings. */
-const DEFAULT_NORTH_URL = "https://north.vercel.app";
+const DEFAULT_NORTH_URL = "http://localhost:5174";
 
 const { domain, code, names, minutesLeft, ruleId } = parseBlockParams(location.search);
 const copy = describeBlock({ code, domain, names, minutesLeft });
@@ -27,7 +31,6 @@ $("domain").textContent = domain || "This website";
 
 if (copy.tone === "focus") {
   $("card").classList.add("focus");
-  $("mark").textContent = "🧠";
 }
 
 // A countdown, so "Focus Mode is running" is also a real answer to "for how
@@ -61,7 +64,7 @@ $("openNorth").onclick = async () => {
   let url = DEFAULT_NORTH_URL;
   try {
     const { northWebUrl } = await chrome.storage.local.get("northWebUrl");
-    if (northWebUrl) url = northWebUrl;
+    if (northWebUrl && isTrustedOrigin(new URL(northWebUrl).origin)) url = northWebUrl;
   } catch { /* unset — the default is still a real destination */ }
   const flow = new URL(url);
   flow.searchParams.set("tab", "flow");

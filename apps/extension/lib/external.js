@@ -26,7 +26,8 @@
 export const NORTH_WEB_ORIGINS = [
   "http://localhost:5173", // vite dev (the real app)
   "http://localhost:5174", // vite preview harness (port pinned by config)
-  "https://north.vercel.app", // deployed origin — see apps/extension/README.md
+  "http://127.0.0.1:5173",
+  "http://127.0.0.1:5174",
 ];
 
 /**

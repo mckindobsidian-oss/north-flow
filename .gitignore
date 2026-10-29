@@ -8,9 +8,21 @@ target/
 web-build/
 
 # Preview / tooling noise
+.tmp/
+apps/mobile/android/.gradle/
+apps/mobile/android/.kotlin/
+apps/mobile/android/**/build/
+apps/mobile/modules/**/build/
+apps/mobile/android/local.properties
+apps/mobile/.build/
+apps/mobile/.signing/
+artifacts/
+*.apk
+*.keystore
 .freebuff/*.log
 .freebuff/*.log.err
 .freebuff/preview-*
+.freebuff/artifacts/
 supabase/.temp/
 *.log
 

@@ -52,7 +52,24 @@ import {
 import { externalAction, isTrustedOrigin, NORTH_WEB_ORIGINS } from "../apps/extension/lib/external.js";
 import { validateProjectConfig } from "../apps/extension/lib/north-auth.js";
 import { connectExtensionAccount } from "../react-app/src/lib/extension.js";
-import { aggregateUsageRange, splitUsageInterval, selectUsageTabs } from "../apps/extension/lib/usage.js";
+import { aggregateUsageRange, splitUsageInterval, selectUsageTabs, httpHost, summarizeDesktopUsage } from "../apps/extension/lib/usage.js";
+
+test("synced desktop usage combines collectors without duplicating the legacy total", () => {
+  assert.deepEqual(summarizeDesktopUsage([
+    { kind: "app", name: "notepad", seconds: 20, device_id: "desktop-a" },
+    { kind: "app", name: "notepad", seconds: 30, device_id: "desktop-b" },
+    { kind: "app", name: "notepad", seconds: 40, device_id: "legacy" },
+    { kind: "website", name: "example.com", seconds: 100 },
+  ]), [{ name: "notepad", seconds: 50 }]);
+});
+
+test("tracking excludes internal pages and preserves frequent fractional samples", () => {
+  for (const url of ["chrome://extensions", "brave://newtab", "chrome-extension://abcdefghijklmnop/popup.html", "about:blank", "file:///private.txt"]) assert.equal(httpHost(url), null);
+  assert.equal(httpHost("https://www.example.com/page"), "example.com");
+  const start = Date.parse("2026-10-21T12:00:00Z");
+  const samples = Array.from({ length: 5 }, (_, index) => splitUsageInterval("example.com", start + index * 250, start + (index + 1) * 250));
+  assert.equal(samples.flat().reduce((sum, row) => sum + row.seconds, 0), 1.25);
+});
 
 import { readFileSync } from "node:fs";
 import { createHash, createPublicKey } from "node:crypto";
@@ -494,6 +511,7 @@ for (const origin of NORTH_WEB_ORIGINS) {
 test("any other origin is refused, including lookalikes and subdomains", () => {
   for (const origin of [
     "https://evil.example",
+    "https://north.vercel.app",     // example domain is not this North deployment
     "http://localhost:3000",         // a different local app
     "https://north.vercel.app.evil.com",
     "https://evilnorth.vercel.app",
@@ -588,19 +606,17 @@ test("usage intervals split at UTC midnight without losing or double-counting ti
   ]);
 });
 
-test("browser usage optionally includes audible background tabs without double-counting a site", () => {
+test("browser usage counts only the foreground page and stops without an active page", () => {
   const tabs = selectUsageTabs(
     { id: 1, url: "https://work.example.com" },
-    [{ id: 2, url: "https://music.example.com/watch" }, { id: 3, url: "https://music.example.com/other" }],
-    true,
     (url) => { try { return new URL(url).hostname.replace(/^www\./, ""); } catch { return null; } },
     1234,
   );
   assert.deepEqual(tabs, [
-    { tabId: 2, host: "music.example.com", since: 1234 },
     { tabId: 1, host: "work.example.com", since: 1234 },
   ]);
-  assert.deepEqual(selectUsageTabs(null, [{ id: 2, url: "https://music.example.com" }], false, () => "music.example.com", 1234), []);
+  assert.deepEqual(selectUsageTabs(null, httpHost, 1234), []);
+  assert.deepEqual(selectUsageTabs({ id: 2, url: "chrome://newtab" }, httpHost, 1234), []);
 });
 
 test("usage history sums each website over an inclusive date range", () => {

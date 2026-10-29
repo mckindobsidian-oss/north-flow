@@ -2,13 +2,15 @@
 {
   "manifest_version": 3,
   "name": "NORTH Flow — Focus & Website Blocker",
-  "version": "0.3.0",
+  "version": "0.3.7",
+  "minimum_chrome_version": "120",
   "description": "Focus sessions, scheduled website blocking and private screen-time, driven by the same block rules as the NORTH web and desktop apps.",
   "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAk+XtfPgSgLBSSQSlNRvqT70xkoXfznqbyXsCyzkpLZpaA+t2ZVYMLmr3+B/YPpoZE/1iBdnLeJjnehjByztUER0TjjruT6Zipb7wLAux8Yv5VqSjE9/+SGvvY5a4v6MjFtEkbfxofjwT6t9iUDDWdvE2cZPoCu8VhP254NKzEQRay+YfP37HOi8fVa98dQQP7ZOmB2eJ3mRdsi5nk2eY9yy/CUszU98El8z1/NzQl7pLt+QKcspVx28+kgjjXzPuJUdOlN91N7Sjut+A07JW8xkYa5BtWgd9gDWjRGWRxWMyDgyb2IGKSi6bBouI3s1c1JC7h433ZYf58k3Bw4oaXQIDAQAB",
   "permissions": [
     "storage",
     "alarms",
     "tabs",
+    "idle",
     "notifications",
     "declarativeNetRequest",
     "webNavigation"
@@ -40,7 +42,8 @@
     "matches": [
       "http://localhost:5173/*",
       "http://localhost:5174/*",
-      "https://north.vercel.app/*"
+      "http://127.0.0.1:5173/*",
+      "http://127.0.0.1:5174/*"
     ]
   }
 }

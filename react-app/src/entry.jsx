@@ -13,9 +13,17 @@
 import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
 import App from "./focusly.jsx";
+import { desktopOAuthDestination } from "./lib/desktop-oauth.js";
+
+const desktopReturn = desktopOAuthDestination(window.location.search);
+if (desktopReturn) {
+  const params = new URLSearchParams(window.location.search);
+  for (const key of ["code", "error"]) if (params.has(key)) desktopReturn.searchParams.set(key, params.get(key));
+  if (params.has("code") || params.has("error")) window.location.replace(desktopReturn.toString());
+}
 
 createRoot(document.getElementById("root")).render(
   <StrictMode>
-    <App />
+    {desktopReturn ? <main style={{ padding: 32, fontFamily: "system-ui", color: "#f8f9fc", background: "#191b24", minHeight: "100vh" }}><h1>Return to North Desktop</h1><p>Finish signing in from the browser window that opened.</p></main> : <App />}
   </StrictMode>
 );

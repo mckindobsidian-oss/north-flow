@@ -2,6 +2,8 @@
 
 Roadmap status is directional. “Implemented” means source exists; “Verified” requires recorded evidence in `PROGRESS.md`.
 
+Android update (2026-10-24): native core screens, Kotlin foreground tracking/overlay enforcement, optional browser access/DNS filtering and existing-account synchronization are implemented. Signed ARM64 release APK and static package checks passed; physical-device verification, native Spotify-player parity, mobile photo-upload controls and terminated-app focus alarms remain separate work. See `apps/mobile/VERIFICATION.md`; do not mark Android production-ready from source/build checks alone.
+
 ## Now — focus and truthfulness
 
 Web revamp follow-through (2026-10-17): finish page-by-page polish, consolidate app-level active timer lifecycle, add conflict-safe account reconciliation, verify real OAuth/import/playback, implement Spotify artwork/progress/playlist support, optimize wallpaper and JS payloads, and complete the responsive/accessibility matrix. Consider quick capture and recurring tasks only after shared schema semantics are tested. Current implementation evidence is in `PROGRESS.md`.

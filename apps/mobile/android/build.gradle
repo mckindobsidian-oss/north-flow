@@ -1,0 +1,49 @@
+// Top-level build file where you can add configuration options common to all sub-projects/modules.
+
+buildscript {
+  repositories {
+    google()
+    mavenCentral()
+  }
+  dependencies {
+    classpath('com.android.tools.build:gradle')
+    classpath('com.facebook.react:react-native-gradle-plugin')
+    classpath('org.jetbrains.kotlin:kotlin-gradle-plugin')
+  }
+}
+
+def reactNativeAndroidDir = new File(
+  providers.exec {
+    workingDir(rootDir)
+    commandLine("node", "--print", "require.resolve('react-native/package.json')")
+  }.standardOutput.asText.get().trim(),
+  "../android"
+)
+
+allprojects {
+  repositories {
+    maven {
+      // All of React Native (JS, Obj-C sources, Android binaries) is installed from npm
+      url(reactNativeAndroidDir)
+    }
+
+    google()
+    mavenCentral()
+    maven { url 'https://www.jitpack.io' }
+  }
+}
+
+// NORTH_WINDOWS_CPP_DRIVER
+// Windows 8.3 aliases can hide clang++'s suffix; explicitly retain C++ linking.
+// https://clang.llvm.org/doxygen/ToolChain_8cpp_source.html
+if (System.getProperty('os.name').startsWith('Windows')) {
+    subprojects { sub ->
+        sub.afterEvaluate {
+            if (sub.name == 'expo-modules-core') {
+                sub.android.defaultConfig.externalNativeBuild.cmake.arguments '-DCMAKE_SHARED_LINKER_FLAGS=--driver-mode=g++'
+            }
+        }
+    }
+}
+apply plugin: "expo-root-project"
+apply plugin: "com.facebook.react.rootproject"

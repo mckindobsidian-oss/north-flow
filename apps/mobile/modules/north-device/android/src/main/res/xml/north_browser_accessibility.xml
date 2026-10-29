@@ -1,0 +1,9 @@
+<accessibility-service xmlns:android="http://schemas.android.com/apk/res/android"
+  android:accessibilityEventTypes="typeWindowStateChanged|typeWindowContentChanged"
+  android:accessibilityFeedbackType="feedbackGeneric"
+  android:accessibilityFlags="flagReportViewIds"
+  android:notificationTimeout="500"
+  android:canRetrieveWindowContent="true"
+  android:canPerformGestures="false"
+  android:packageNames="com.android.chrome,com.chrome.beta,com.brave.browser,com.microsoft.emmx,org.mozilla.firefox,com.sec.android.app.sbrowser"
+  android:description="@string/north_browser_access_description" />

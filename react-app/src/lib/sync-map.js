@@ -209,6 +209,8 @@ export function docFromProfile(profile) {
     apps: Array.isArray(profile.apps) ? profile.apps : [],
     hiddenUsageSites: Array.isArray(profile.hiddenUsageSites) ? profile.hiddenUsageSites : [],
     pm: profile.pm || {},
+    appearance: profile.appearance || null,
+    streakDays: profile.streakDays || {},
     // Account theme — an ENVIRONMENT id (one of the five built-in wallpapers,
     // "custom", or a registered future id). Absent on records written before
     // themes synced, and possibly one of the retired generic-gradient ids on
@@ -238,6 +240,8 @@ export function profileFromRows({ un, profileRow, taskRows = [], friendRows = []
     ...(settings.theme ? { theme: settings.theme } : {}),
     friends: friendRows.map((f) => f.friend_un),
     pm: settings.pm || { w: 25, sb: 5, lb: 15, sound: false, notify: false },
+    appearance: settings.appearance || null,
+    streakDays: settings.streakDays || {},
     blocking: normalizeState({
       rules: blocking.rules || [],
       usageLimits: blocking.usageLimits || [],
@@ -282,7 +286,7 @@ export function signature(key, value) {
     if (String(key).startsWith("fs:")) return (value || []).map((s) => s.id).join(",");
     const doc = docFromProfile(value);
     return JSON.stringify([
-      doc.name, doc.email, doc.pm, doc.apps, doc.hiddenUsageSites, doc.blocking,
+      doc.name, doc.email, doc.pm, doc.apps, doc.hiddenUsageSites, doc.blocking, doc.theme, doc.appearance, doc.streakDays,
       // Difficulty and description MUST be in here: this fingerprint decides
       // whether a task is pushed at all, so leaving them out would mean editing
       // only one of them pushed nothing and the change stayed on one device.

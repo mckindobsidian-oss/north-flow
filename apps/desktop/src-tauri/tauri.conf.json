@@ -4,19 +4,26 @@
   "version": "0.2.0",
   "identifier": "com.north.desktop",
   "build": {
-    "frontendDist": "../dist"
+    "beforeDevCommand": "npm --prefix ../../react-app run dev -- --port 5175 --strictPort",
+    "devUrl": "http://localhost:5175",
+    "beforeBuildCommand": "npm --prefix ../../react-app run build",
+    "frontendDist": "../../../react-app/dist"
   },
   "app": {
     "withGlobalTauri": true,
+    "appDirectoriesOverride": {
+      "localData": "$LOCALDATA/NorthDesktop"
+    },
     "windows": [
       {
         "title": "NORTH",
-        "width": 460,
-        "height": 860,
+        "width": 1200,
+        "height": 820,
         "minWidth": 380,
-        "minHeight": 520,
+        "minHeight": 560,
         "resizable": true,
-        "center": true
+        "center": true,
+        "dataDirectory": "north-webview-v1"
       }
     ],
     "security": {
@@ -25,6 +32,7 @@
   },
   "bundle": {
     "active": true,
-    "targets": "all"
+    "targets": "all",
+    "icon": ["icons/32x32.png", "icons/128x128.png", "icons/128x128@2x.png", "icons/icon.icns", "icons/icon.ico"]
   }
 }

@@ -25,9 +25,9 @@
  * (Supabase redirect URL, dev build, native deps) are documented there.
  */
 import { useEffect, useRef, useState } from "react";
-import { supabase, supabaseConfigured, sessionsPersist } from "./supabase.js";
+import { supabase, supabaseConfigured, sessionsPersist, securePkceReady } from "./supabase.js";
 import { PROFILE_KEY, SESSION_KEY, defaultProfile, hydrateProfile, toAppUser, usernameFromEmail } from "../shared/account.js";
-import { createSync, newUuid } from "../../react-app/src/lib/sync.js";
+import { createSync, newUuid } from "../../../react-app/src/lib/sync.js";
 
 // ── the device store S.* (AsyncStorage-backed JSON strings, web-compatible) ─
 // Key scheme and value shapes are identical to the web app so the same sync
@@ -57,9 +57,15 @@ try {
   }
 } catch { /* memory until the package is installed */ }
 
+const subscribers = new Set();
+export const subscribeStore = (callback) => { subscribers.add(callback); return () => subscribers.delete(callback); };
 export const S = {
   get: (k, s) => backing.get(k, s),
-  set: (k, v, s) => backing.set(k, v, s),
+  set: async (k, v, s, options) => {
+    await backing.set(k, v, s);
+    if (!options?.remote) SYNC.afterWrite(k);
+    subscribers.forEach((callback) => callback(k));
+  },
   del: (k, s) => backing.delete(k, s),
 };
 
@@ -70,8 +76,20 @@ export const S = {
 export const SYNC = createSync({ store: S, client: supabase, configured: supabaseConfigured });
 
 /** Build the app user from a Supabase session user (or device record). */
-async function adoptAccount(accountUser) {
-  const un = usernameFromEmail(accountUser?.email, accountUser?.id);
+let adoption = null;
+function adoptAccount(accountUser) {
+  if (adoption?.id === accountUser?.id) return adoption.promise;
+  const promise = adoptAccountRun(accountUser);
+  adoption = { id: accountUser?.id, promise };
+  promise.finally(() => { if (adoption?.promise === promise) adoption = null; }).catch(() => {});
+  return promise;
+}
+async function adoptAccountRun(accountUser) {
+  const canonical = accountUser?.id && supabase ? await supabase.from('profiles').select('un').eq('id', accountUser.id).maybeSingle() : null;
+  const remembered = await S.get(SESSION_KEY);
+  const offlineName = remembered?.userId === accountUser?.id ? remembered.un : null;
+  if (canonical?.error && !offlineName) throw new Error('Reconnect once to load your existing North account safely.');
+  const un = canonical?.data?.un || offlineName || usernameFromEmail(accountUser?.email, accountUser?.id);
   const raw = await S.get(PROFILE_KEY(un));
   const profile = raw
     ? hydrateProfile(raw, { un })
@@ -82,7 +100,7 @@ async function adoptAccount(accountUser) {
       });
   if (!raw) await S.set(PROFILE_KEY(un), profile);
   const mapped = toAppUser(accountUser, profile);
-  await S.set(SESSION_KEY, { un: mapped.un });
+  await S.set(SESSION_KEY, { un: mapped.un, userId: accountUser?.id });
   SYNC.attach({ userId: accountUser?.id, un: mapped.un });
   if (accountUser?.id) {
     await SYNC.bootstrap(mapped.un).catch(() => {});
@@ -101,6 +119,14 @@ export async function restoreSession() {
       return raw ? hydrateProfile(raw, { un: sess.un }) : null; // device-only user
     }
     return null;
+  }
+  const { device } = require('./device.js');
+  if (device) {
+    const native = JSON.parse(await device.session());
+    if (native.owner && native.access_token && native.refresh_token) {
+      const result = await supabase.auth.setSession({ access_token: native.access_token, refresh_token: native.refresh_token });
+      if (!result.error && result.data.user?.id === native.owner) return adoptAccount(result.data.user);
+    }
   }
   const { data } = await supabase.auth.getSession();
   if (data?.session?.user) return adoptAccount(data.session.user);
@@ -122,6 +148,7 @@ export async function signInWithPassword(email, password) {
  */
 export async function signUpWithPassword(email, password, name) {
   if (!supabaseConfigured) throw new Error("Accounts aren't configured on this device.");
+  if (!securePkceReady) throw new Error('Secure sign-in components are unavailable. Please update North.');
   const { data, error } = await supabase.auth.signUp({
     email: String(email).trim(),
     password,
@@ -186,6 +213,10 @@ export async function resendConfirmation(email) {
  */
 export async function signInWithGoogle() {
   if (!supabaseConfigured || !supabase) throw new Error("Accounts aren't configured on this device.");
+  const { requireOptionalNativeModule } = require('expo-modules-core');
+  if (!securePkceReady || !requireOptionalNativeModule('ExpoWebBrowser')) {
+    throw new Error('This North build is missing secure sign-in components. Please install the latest North update.');
+  }
   // Lazy requires: these native modules are optional peers, and requiring them
   // at module scope would break `npx expo start` for anyone who hasn't
   // installed them yet (the same honesty rule as AsyncStorage).
@@ -201,6 +232,17 @@ export async function signInWithGoogle() {
     throw new Error("Google sign-in needs expo-web-browser + expo-crypto — run: npx expo install expo-web-browser expo-crypto");
   }
   const redirectUri = "north://auth";
+  const { data: oauth, error: oauthError } = await supabase.auth.signInWithOAuth({ provider: 'google', options: { redirectTo: redirectUri, skipBrowserRedirect: true } });
+  if (oauthError) throw oauthError;
+  const response = await WebBrowser.openAuthSessionAsync(oauth.url, redirectUri);
+  if (response.type !== 'success') throw new Error('Sign-in cancelled.');
+  const callback = new URL(response.url);
+  const code = callback.searchParams.get('code');
+  if (!code) throw new Error(callback.searchParams.get('error_description') || 'Sign-in did not return a code.');
+  const exchanged = await supabase.auth.exchangeCodeForSession(code);
+  if (exchanged.error) throw exchanged.error;
+  return adoptAccount(exchanged.data.user);
+  /* Legacy handwritten flow is retained below only until migration cleanup.
   // PKCE (RFC 7636): verifier is high-entropy; only the challenge travels.
   const verifier = base64Url(randomBytes(32));
   const digest = await Crypto.digestStringAsync(Crypto.CryptoDigestAlgorithm.SHA256, verifier);
@@ -231,7 +273,7 @@ export async function signInWithGoogle() {
     if (error) throw new Error(error.message);
     return adoptAccount(data.user);
   }
-  throw new Error("Sign-in returned no credentials.");
+  throw new Error("Sign-in returned no credentials."); */
 }
 
 /**
@@ -274,7 +316,7 @@ function base64Url(bytes) {
 
 /** Sign out everywhere that matters: service, device pointer, sync state. */
 export async function signOut() {
-  try { if (supabaseConfigured && supabase) await supabase.auth.signOut(); } catch {}
+  try { if (supabaseConfigured && supabase) await supabase.auth.signOut({ scope: 'local' }); } catch {}
   await S.del(SESSION_KEY);
   SYNC.detach();
 }
@@ -286,10 +328,14 @@ export async function signOut() {
  */
 export function onAuthChange(handler) {
   if (!supabaseConfigured || !supabase) return () => {};
-  const { data } = supabase.auth.onAuthStateChange(async (event, session) => {
-    if (event === "SIGNED_OUT" || !session?.user) return handler(null);
+  const { data } = supabase.auth.onAuthStateChange((event, session) => {
+    if (event === "SIGNED_OUT" || !session?.user) {
+      if (event === 'SIGNED_OUT') SYNC.detach();
+      if (event === 'SIGNED_OUT') setTimeout(() => { const {device}=require('./device.js'); device?.stop().catch(()=>{}); },0);
+      return handler(null);
+    }
     if (event === "SIGNED_IN" || event === "TOKEN_REFRESHED" || event === "USER_UPDATED") {
-      handler(await adoptAccount(session.user));
+      setTimeout(() => adoptAccount(session.user).then(handler).catch(() => {}), 0);
     }
   });
   return () => { try { data?.subscription?.unsubscribe(); } catch {} };

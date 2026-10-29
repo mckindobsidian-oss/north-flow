@@ -5,10 +5,15 @@ A precise inventory, written from the code (`react-app/src/lib/sync.js`,
 thing syncs, that is because a push path exists for it; if it says it does not,
 there is no path.
 
-**Scope warning, stated first:** this documents the **web client only**. The
-extension, desktop and mobile clients keep everything on the device (see the
-last section). So "syncs" below means "syncs between web sessions on different
-devices", which today is the whole of the working ecosystem.
+The React website and bundled desktop UI use the same account sync engine.
+The extension adopts account rules through authenticated REST requests and
+uploads browser usage; the native desktop bridge uploads application usage.
+Local caches keep enforcement available offline. Mobile integration remains
+partially implemented and requires device verification.
+
+The website and desktop UI listen for owner-filtered Realtime changes to
+`profiles` and `usage_records`. Rejoining refreshes the profile after pending
+edits upload successfully. The extension retains its alarm-driven REST sync.
 
 ## 0. The path a change takes
 
@@ -19,6 +24,7 @@ screen → S.* (storage boundary) → local cache ──────────
                                     → sync.js         queue + push handlers
                                     → PostgREST       policy check (RLS)
                                     → Postgres tables
+                                      ↘ Realtime invalidation → web pull
 
 sign-in / boot → SYNC.bootstrap → push this device first, then pull the account
                                 → local cache → screens
@@ -30,7 +36,7 @@ Four files matter, and only one of them knows about the network:
 |---|---|
 | `react-app/src/focusly.jsx` (`S`) | The single storage boundary. Every screen goes through it. Resolves `window.storage` → `localStorage` → in-memory. |
 | `react-app/src/lib/sync-map.js` | Pure translation: app shape ⇄ table row, plus the change fingerprint. No network, no DOM — this is the half covered by `tests/sync.test.mjs`. |
-| `react-app/src/lib/sync.js` | The engine: pending queue, push handlers, pull, leaderboard RPC. |
+| `react-app/src/lib/sync.js` | The engine: pending queue, push handlers, pull, account-scoped Realtime invalidation, leaderboard RPC. |
 | `supabase/schema.sql` | Tables, constraints, triggers and RLS — the only place security is actually enforced. |
 
 ### What is written locally — every key the app uses
@@ -94,7 +100,7 @@ for working features.
 
 | Thing | Status |
 |---|---|
-| `usage_records` table | **Nothing writes it.** The extension tracks per-domain time in `chrome.storage.local`, but has no account, so it never posts. The web screen-time screen is manual entry stored in `profiles.settings.apps`. |
+| `usage_records` table | Written by the extension and native desktop collector. The extension keeps a local queue and uploads finished browser-day snapshots; the desktop bridge uploads foreground-app rows. The additive device-source migration lets multiple collectors coexist, while the client fallback keeps older deployments readable. |
 | `focus_sessions.phase` = `shortBreak` / `longBreak` | The timer only records phase 0. `finish()` persists a record only `if (p === 0)`, so break sessions are never stored — only focus sessions are. |
 | `block_rules` / `block_schedules` mirror rows | Written on every profile push, **never read back**. Pulls reconstruct the blocking document from `profiles.settings.blocking`. The mirror exists for server-side reporting and joins. |
 | `boards.cols` | Not stored. All three columns (todo/doing/done) are fixed by the product and rebuilt client-side. |
@@ -163,12 +169,12 @@ will see one overwrite the other, whichever flushes second. There are no vector
 clocks and no per-field reconciliation. For one person on several devices that
 is a reasonable trade; it would not be for collaborative editing.
 
-## 6. Clients that do not sync at all
+## 6. Client sync status
 
 | Client | Where its data actually lives | What it would need |
 |---|---|---|
-| Browser extension | `chrome.storage.local` (`northBlocking`, `usage`, `northBlockedAttempts`) — **now a real client**: `lib/north-auth.js` speaks the GoTrue REST protocol and `background.js` syncs rules/schedules/description and uploads finished days of usage through the same tables | Google sign-in (`chrome.identity` + web redirect). Email + password auth is complete. Blocked-attempt counts stay local (uploading them would need a `usage_records` column) |
-| Desktop app | `north-blocking.json` in the OS app-config dir | Sign-in, and a build that has ever been compiled |
+| Browser extension | `chrome.storage.local` (`northBlocking`, `usage`, `northBlockedAttempts`) plus account-backed rules and usage uploads | Website connection flow; blocked-attempt counts remain local because they are not part of the usage schema |
+| Desktop app | `north-blocking.json` in the OS app-config dir plus account-backed blocking and desktop usage uploads | A native build and Google OAuth provider/redirect configuration for interactive sign-in |
 | Mobile app | React state only — **lost on every restart** | `AsyncStorage` first, then sign-in |
 
 ## 7. How to verify any of this yourself

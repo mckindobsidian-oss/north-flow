@@ -5,18 +5,30 @@
   "main": "index.js",
   "scripts": {
     "start": "expo start",
-    "android": "expo start --android",
-    "ios": "expo start --ios"
+    "android": "expo run:android",
+    "ios": "expo run:ios",
+    "prebuild:android": "expo prebuild --platform android --no-install"
   },
   "dependencies": {
     "@expo/vector-icons": "^14.1.0",
-    "@react-native-async-storage/async-storage": "^1.24.0",
+    "@react-native-async-storage/async-storage": "2.1.2",
+    "@supabase/supabase-js": "2.116.0",
     "expo": "~53.0.0",
-    "expo-crypto": "~14.1.4",
+    "expo-asset": "11.1.7",
+    "expo-audio": "~0.4.9",
+    "expo-constants": "17.1.8",
+    "expo-crypto": "14.1.5",
+    "expo-font": "13.3.2",
+    "expo-linking": "7.1.7",
+    "expo-secure-store": "~14.2.4",
     "expo-status-bar": "~2.2.3",
-    "expo-web-browser": "~14.0.2",
+    "expo-web-browser": "14.2.0",
     "react": "19.0.0",
-    "react-native": "0.79.2"
+    "react-native": "0.79.2",
+    "react-native-safe-area-context": "5.4.0",
+    "react-native-svg": "15.11.2",
+    "react-native-url-polyfill": "2.0.0",
+    "react-native-webview": "^13.13.5"
   },
   "devDependencies": {
     "@babel/core": "^7.25.0"

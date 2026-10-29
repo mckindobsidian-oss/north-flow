@@ -34,7 +34,9 @@
  */
 
 import * as northAuth from "./lib/north-auth.js";
-import { aggregateUsageRange, splitUsageInterval, selectUsageTabs } from "./lib/usage.js";
+import { readRestBody } from './lib/rest-body.js';
+import { aggregateUsageRange, splitUsageInterval, selectUsageTabs, httpHost, summarizeDesktopUsage, observedInterval } from "./lib/usage.js";
+import { splitHourlyInterval, mergeActivitySnapshots } from "./lib/activity.js";
 
 // Restore the persisted session as soon as the worker wakes, so authStatus
 // answers instantly and the badge can reflect the account state.
@@ -73,12 +75,15 @@ const KEY = {
   account: "northAccount",
   /** { "YYYY-MM-DD": { "domain": seconds } } — untouched by the v2 upgrade. */
   usage: "usage",
+  hourlyUsage: "northHourlyUsage",
   /** UTC date string of the last usage upload, so a day uploads exactly once. */
   usageSyncedAt: "northUsageSyncedAt",
   /** Current tab timer survives MV3 service-worker suspension. */
   activeUsage: "northActiveUsage",
   /** Account which owns the current local usage bucket, if signed in before. */
   usageOwner: "northUsageOwnerId",
+  /** Stable id for this browser collector; never leaves usage rows with account identity. */
+  usageDevice: "northUsageDeviceId",
   /** Pre-v2 flat block list, read once by the migration below. */
   legacyBlocked: "blockedSites",
   /** Pre-v2 focus window, read once by the migration below. */
@@ -98,6 +103,8 @@ const KEY = {
   audioUsage: "northTrackBackgroundAudio",
   sessionUsage: "northSessionUsage",
   pendingSessions: "northPendingSessions",
+  desktopUsage: "northDesktopUsage",
+  accountUsage: "northAccountActivity",
 };
 
 const ALARMS = { focusEnd: "focus-end", usageFlush: "usage-flush", blockSync: "block-sync" };
@@ -160,16 +167,45 @@ async function authContext() {    const [{ [KEY.account]: account }, { [KEYS_URL
 async function postgrest(path, { method = "GET", body, jwt, url, anonKey } = {}) {
   const res = await fetch(`${rest(url, anonKey)}${path}`, {
     method,
+    signal: AbortSignal.timeout(15000),
     headers: {
       apikey: anonKey,
       Authorization: `Bearer ${jwt}`,
       "Content-Type": "application/json",
-      ...(method === "GET" ? {} : { Prefer: "resolution=merge-duplicates,return=minimal" }),
+      ...(method === "GET" || path.startsWith('/rpc/') ? {} : { Prefer: "resolution=merge-duplicates,return=minimal" }),
     },
     body: body === undefined ? undefined : JSON.stringify(body),
   });
-  if (!res.ok) throw new Error(`sync ${method} ${path} → ${res.status}`);
-  return res.status === 204 ? null : res.json();
+  if (!res.ok) {
+    const error = new Error(`sync ${method} ${path} → ${res.status}`);
+    error.status = res.status;
+    throw error;
+  }
+  // PostgREST return=minimal may succeed with 201 and an empty body too.
+  return readRestBody(res);
+}
+
+async function usageDeviceId() {
+  const raw = await chrome.storage.local.get(KEY.usageDevice);
+  if (raw[KEY.usageDevice]) return raw[KEY.usageDevice];
+  const id = globalThis.crypto?.randomUUID?.() || `extension-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+  await chrome.storage.local.set({ [KEY.usageDevice]: id });
+  return id;
+}
+
+async function uploadUsageRows(ctx, rows, deviceId) {
+  try {
+    await postgrest(`/usage_records?on_conflict=user_id,day,kind,name,device_id`, {
+      method: "POST", jwt: ctx.jwt, url: ctx.url, anonKey: ctx.anonKey, body: rows.map((row) => ({ ...row, device_id: deviceId, source: "extension" })),
+    });
+  } catch (error) {
+    // Backward compatible until the additive migration is applied. Once the
+    // new columns exist, the first request is the only path used.
+    if (error?.status !== 400) throw error;
+    await postgrest(`/usage_records?on_conflict=user_id,day,kind,name`, {
+      method: "POST", jwt: ctx.jwt, url: ctx.url, anonKey: ctx.anonKey, body: rows,
+    });
+  }
 }
 
 /** The focus window's provenance — see lib/account-merge.js for the policy. */
@@ -191,6 +227,8 @@ async function syncAccount() {
     );
     let profile = Array.isArray(me) ? me[0] : null;
     if (!profile) return { ok: false, reason: "no_profile" };
+    await chrome.storage.local.set({ northInterfaceSounds: Boolean(profile.settings?.pm?.interfaceSounds) });
+    await chrome.storage.local.set({ northAppearance: profile.settings?.appearance || null });
     const theme = profile.settings?.theme;
     if (typeof theme === "string" && /^[a-z][a-z0-9-]{1,40}$/.test(theme)) {
       await chrome.storage.local.set({ [KEY.theme]: theme });
@@ -227,15 +265,30 @@ async function syncAccount() {
       await syncRules(focusChanged ? "account-focus" : "account-pull");
     }
 
-    await postgrest(
-      `/profiles?id=eq.${ctx.uid}`,
-      {
-        method: "PATCH",
-        jwt: ctx.jwt, url: ctx.url, anonKey: ctx.anonKey,
-        body: { settings: { ...(profile.settings || {}), ...blockingToSettings(merged) } },
-      }
-    );
+    // Routine pulls must not publish an earlier snapshot over a newer edit.
+    // Explicit edits publish through commitBlocking/writeBlockingToAccount.
     await chrome.storage.local.set({ [KEY.lastSync]: Date.now() });
+    // Desktop reports the same account's foreground activity through usage_records.
+    // Cache it separately: it must never spend this browser's website allowance.
+    try {
+      const day = new Date().toISOString().slice(0, 10);
+      const rows = [];
+      for (let offset = 0; ; offset += 1000) {
+        const from = new Date(Date.parse(`${day}T00:00:00Z`) - 6 * 86400000).toISOString().slice(0, 10);
+        const page = await postgrest(`/usage_records?user_id=eq.${ctx.uid}&day=gte.${from}&day=lte.${day}&select=day,kind,name,seconds,device_id,hourly&order=day,kind,name,device_id&limit=1000&offset=${offset}`, {
+          jwt: ctx.jwt, url: ctx.url, anonKey: ctx.anonKey,
+        });
+        rows.push(...(page || []));
+        if (!page || page.length < 1000) break;
+      }
+      const latest = (await chrome.storage.local.get(KEY.account))[KEY.account];
+      if (latest?.authUserId === ctx.uid) {
+        await chrome.storage.local.set({
+          [KEY.desktopUsage]: { owner: ctx.uid, day, rows: summarizeDesktopUsage(rows.filter((row) => row.day === day)) },
+          [KEY.accountUsage]: { owner: ctx.uid, rows, hiddenSites: profile.settings?.hiddenUsageSites || [] },
+        });
+      }
+    } catch { /* Keep the account-scoped last snapshot while offline. */ }
     return { ok: true, focus: focusAfter > Date.now() ? { endAt: focusAfter } : null };
   } catch (e) {
     console.debug("[north] account sync failed:", e?.message || e);
@@ -278,8 +331,8 @@ async function commitBlocking(state, reason) {
 }
 
 /**
- * Upload yesterday's usage once per UTC day (never today — the day isn't
- * over). On failure nothing is marked, so the next attempt retries.
+ * Upload the current day too so other North clients can show recent activity.
+ * Completed-day markers advance only after a successful upload.
  */
 let usageSyncing = null;
 async function syncUsage() {
@@ -292,15 +345,16 @@ async function syncUsage() {
     // changes, archive each user's local bucket so browsing history never
     // uploads into somebody else's account.
     await bumpUsage();
-    const { [KEY.usage]: current = {}, [KEY.usageOwner]: owner = null, [KEY.usageSyncedAt]: marker = null } =
-      await chrome.storage.local.get([KEY.usage, KEY.usageOwner, KEY.usageSyncedAt]);
+    const { [KEY.usage]: current = {}, [KEY.hourlyUsage]: currentHourly = {}, [KEY.usageOwner]: owner = null, [KEY.usageSyncedAt]: marker = null } =
+      await chrome.storage.local.get([KEY.usage, KEY.hourlyUsage, KEY.usageOwner, KEY.usageSyncedAt]);
     if (owner && owner !== ctx.uid) {
       const previousKey = `northUsageArchive:${owner}`;
       const nextKey = `northUsageArchive:${ctx.uid}`;
-      await chrome.storage.local.set({ [previousKey]: { usage: current, syncedAt: marker } });
+      await chrome.storage.local.set({ [previousKey]: { usage: current, hourly: currentHourly, syncedAt: marker } });
       const { [nextKey]: next = null } = await chrome.storage.local.get(nextKey);
       await chrome.storage.local.set({
         [KEY.usage]: next?.usage || {},
+        [KEY.hourlyUsage]: next?.hourly || {},
         [KEY.usageSyncedAt]: next?.syncedAt || null,
         [KEY.usageOwner]: ctx.uid,
       });
@@ -310,9 +364,11 @@ async function syncUsage() {
     }
     const { [KEY.usage]: usage = {}, [KEY.usageSyncedAt]: done = null } =
       await chrome.storage.local.get([KEY.usage, KEY.usageSyncedAt]);
+    const deviceId = await usageDeviceId();
+    const hourlyUsage = (await chrome.storage.local.get(KEY.hourlyUsage))[KEY.hourlyUsage] || {};
     const today = new Date().toISOString().slice(0, 10);
     const dates = Object.keys(usage)
-      .filter((d) => d < today && (!done || d > done))
+      .filter((d) => d <= today && (d === today || !done || d > done))
       .sort();
     for (const day of dates) {
       const rows = Object.entries(usage[day] || {})
@@ -320,18 +376,19 @@ async function syncUsage() {
         .map(([domain, secs]) => ({
           user_id: ctx.uid, day, kind: "website", name: domain,
           seconds: Math.floor(Number(secs) || 0),
+          hourly: hourlyUsage[day]?.[domain] || {},
         }));
       if (rows.length) {
-        await postgrest(`/usage_records?on_conflict=user_id,day,kind,name`, {
-          method: "POST", jwt: ctx.jwt, url: ctx.url, anonKey: ctx.anonKey, body: rows,
-        });
+        await uploadUsageRows(ctx, rows, deviceId);
       }
     }
-    if (dates.length) {
-      await chrome.storage.local.set({ [KEY.usageSyncedAt]: dates[dates.length - 1] });
+    const completed = dates.filter((day) => day < today);
+    if (completed.length) {
+      await chrome.storage.local.set({ [KEY.usageSyncedAt]: completed[completed.length - 1] });
     }
     } catch (e) {
       console.debug("[north] usage upload deferred:", e?.message || e);
+      throw e;
     }
   })().finally(() => { usageSyncing = null; });
   return usageSyncing;
@@ -342,14 +399,32 @@ async function onSignOutCleanup() {
   const state = await loadState();
   const fresh = normalizeState({ ...state, rules: [], usageLimits: [], schedules: [], focus: null, unblocks: {} });
   await saveState(fresh);
-  await chrome.storage.local.remove([KEY.blockingPending, KEY.lastSync]);
+  await chrome.storage.local.remove([KEY.blockingPending, KEY.lastSync, KEY.desktopUsage, KEY.accountUsage]);
   await syncRules("sign-out");
 }
 
 async function currentUsageSeconds() {
   await bumpUsage();
-  const { [KEY.usage]: usage = {} } = await chrome.storage.local.get(KEY.usage);
-  return usage[new Date().toISOString().slice(0, 10)] || {};
+  const rows = await accountActivity(false);
+  const today = new Date().toISOString().slice(0, 10);
+  return Object.fromEntries(rows.filter((row) => row.day === today && row.kind === "website").map((row) => [row.name, row.seconds]));
+}
+
+async function accountActivity(hideExcluded = true, extra = []) {
+  const raw = await chrome.storage.local.get([KEY.usage, KEY.hourlyUsage, KEY.usageOwner, KEY.account, KEY.accountUsage]);
+  const owner = raw[KEY.account]?.authUserId;
+  const cached = raw[KEY.accountUsage]?.owner === owner ? raw[KEY.accountUsage] : null;
+  const local = [];
+  if (!raw[KEY.usageOwner] || raw[KEY.usageOwner] === owner) {
+    const device = await usageDeviceId();
+    for (const [day, sites] of Object.entries(raw[KEY.usage] || {})) {
+      for (const [name, seconds] of Object.entries(sites)) local.push({ day, name, seconds, kind: "website", device_id: device, hourly: raw[KEY.hourlyUsage]?.[day]?.[name] || {} });
+    }
+  }
+  return mergeActivitySnapshots([...(cached?.rows || []), ...extra, ...local]).filter((row) => !hideExcluded
+    || !(cached?.hiddenSites || []).some((site) => row.kind === "app"
+      ? site === `app:${row.name.toLowerCase().replace(/\.exe$/, "")}`
+      : !site.startsWith("app:") && (row.name === site || row.name.endsWith(`.${site}`))));
 }
 
 // ── enforcement ───────────────────────────────────────────────────────────
@@ -368,6 +443,10 @@ async function syncRules(reason = "manual") {
       const now = Date.now();
       const verdict = evaluateBlocking(state, now, await currentUsageSeconds());
       await applyBlockRules(verdict.websites);
+      // Daily caps also take effect on pages that are already open.
+      const tabs = await chrome.tabs.query({ url: ["http://*/*", "https://*/*"] });
+      await Promise.all(tabs.filter((tab) => verdict.websites.some((target) => hostMatches(target, httpHost(tab.pendingUrl || tab.url))))
+        .map((tab) => showBlockPage(tab.id, tab.pendingUrl || tab.url, { state, verdict })));
 
       // Badge: how many domains are blocked right now (empty when none).
       const n = verdict.websites.length;
@@ -431,12 +510,16 @@ async function applyBlockRules(hosts) {
  * ERR_BLOCKED_BY_CLIENT. All this does is make the result legible (and count
  * the attempt, which is what "not today" is actually made of).
  */
-async function showBlockPage(tabId, blockedUrl) {
+const redirectingTabs = new Set();
+async function showBlockPage(tabId, blockedUrl, known) {
+  if (redirectingTabs.has(tabId)) return;
+  redirectingTabs.add(tabId);
   try {
-    const state = await loadState();
+    const state = known?.state || await loadState();
     const now = Date.now();
-    const verdict = evaluateBlocking(state, now, await currentUsageSeconds());
+    const verdict = known?.verdict || evaluateBlocking(state, now, await currentUsageSeconds());
     const host = hostOf(blockedUrl);
+    if (!host || !verdict.websites.some((target) => hostMatches(target, host))) return;
     // Which rule stopped this page — the engine's own reason, never a guess.
     const rule = state.rules.find((r) => r.kind === "website" && verdict.reasons[r.id] && hostMatches(r.target, host));
     const limit = state.usageLimits.find((item) => verdict.reasons[item.id]?.reason === "daily-limit" && hostMatches(item.target, host));
@@ -453,7 +536,7 @@ async function showBlockPage(tabId, blockedUrl) {
     await bumpBlockedAttempt(host);
   } catch (e) {
     console.debug("[north] could not show the block page:", e?.message || e);
-  }
+  } finally { redirectingTabs.delete(tabId); }
 }
 
 /** Count a blocked attempt per domain per day. Local only — see README. */
@@ -562,11 +645,15 @@ chrome.runtime.onInstalled.addListener(async (details) => {
 });
 
 // ── usage tracking (per-domain seconds per day) ───────────────────────────
-const hostOf = (url) => {
-  try { return new URL(url).hostname.replace(/^www\./, ""); } catch { return null; }
-};
+const hostOf = httpHost;
 
 let usageQueue = Promise.resolve();
+// Survives worker suspension, but is cleared on browser restart.
+const browserSessionReady = chrome.storage.session.get("northBrowserSession").then(async (raw) => {
+  const id = raw.northBrowserSession || crypto.randomUUID();
+  await chrome.storage.session.set({ northBrowserSession: id });
+  return id;
+});
 const serializeUsage = (fn) => {
   const job = usageQueue.then(fn, fn);
   usageQueue = job.catch(() => {});
@@ -574,24 +661,29 @@ const serializeUsage = (fn) => {
 };
 
 async function recordUsage(until = Date.now(), clear = false) {
-  const raw = await chrome.storage.local.get([KEY.usage, KEY.activeUsage, KEY.sessionUsage]);
+  const browserSession = await browserSessionReady;
+  const raw = await chrome.storage.local.get([KEY.usage, KEY.hourlyUsage, KEY.activeUsage, KEY.sessionUsage]);
   const usage = raw[KEY.usage] || {};
+  const hourlyUsage = raw[KEY.hourlyUsage] || {};
   const sessions = raw[KEY.sessionUsage] || {};
   const active = raw[KEY.activeUsage];
   const tracks = Array.isArray(active) ? active : (active?.host ? [active] : []);
-  let activeTabId = null;
-  try { activeTabId = (await chrome.tabs.query({ active: true, lastFocusedWindow: true }))[0]?.id ?? null; } catch {}
-  for (const track of tracks) if (track.host && track.since && until > track.since) {
-    const elapsed = Math.floor((until - track.since) / 1000);
-    for (const row of splitUsageInterval(track.host, track.since, until)) {
+  for (const track of tracks) {
+    const interval = observedInterval(track, until, browserSession);
+    if (!track.host || !interval) continue;
+    const elapsed = (interval.endAt - interval.startAt) / 1000;
+    for (const row of splitUsageInterval(track.host, interval.startAt, interval.endAt)) {
       const day = usage[row.day] || (usage[row.day] = {});
       day[row.host] = (day[row.host] || 0) + row.seconds;
     }
-    // Session caps count foreground time for the matching tab only; optional
-    // audible background tracking remains a usage-stat preference, not a way
-    // to spend another tab's session allowance.
+    for (const row of splitHourlyInterval(interval.startAt, interval.endAt)) {
+      const day = hourlyUsage[row.day] || (hourlyUsage[row.day] = {});
+      const hours = day[track.host] || (day[track.host] = {});
+      hours[row.hour] = (hours[row.hour] || 0) + row.seconds;
+    }
+    // Session caps use the same foreground-only time as usage statistics.
     const session = sessions[String(track.tabId)];
-    if (track.tabId === activeTabId && session?.host === track.host && !session.expired) {
+    if (session?.host === track.host && !session.expired) {
       session.usedSeconds = Math.min(session.limitSeconds, (session.usedSeconds || 0) + elapsed);
       if (session.usedSeconds >= session.limitSeconds) {
         session.expired = true;
@@ -607,7 +699,7 @@ async function recordUsage(until = Date.now(), clear = false) {
     }
   }
   const next = !clear ? tracks.map((track) => ({ ...track, since: until })) : [];
-  await chrome.storage.local.set({ [KEY.usage]: usage, [KEY.activeUsage]: next, [KEY.sessionUsage]: sessions, [KEY.pendingSessions]: raw[KEY.pendingSessions] || {} });
+  await chrome.storage.local.set({ [KEY.usage]: usage, [KEY.hourlyUsage]: hourlyUsage, [KEY.activeUsage]: next, [KEY.sessionUsage]: sessions, [KEY.pendingSessions]: raw[KEY.pendingSessions] || {} });
   return usage;
 }
 
@@ -618,7 +710,12 @@ async function interceptSessionVisit(details) {
   const [state, raw] = await Promise.all([
     loadState(), chrome.storage.local.get([KEY.sessionUsage, KEY.pendingSessions]),
   ]);
-  const limit = state.usageLimits.find((item) => item.enabled && item.mode === "session" && hostMatches(item.target, host));
+  const verdict = evaluateBlocking(state, Date.now(), await currentUsageSeconds());
+  if (verdict.websites.some((target) => hostMatches(target, host))) {
+    await showBlockPage(details.tabId, details.url, { state, verdict });
+    return;
+  }
+  const limit = state.usageLimits.find((item) => item.enabled && item.kind === "website" && item.mode === "session" && hostMatches(item.target, host));
   const sessions = raw[KEY.sessionUsage] || {};
   const current = sessions[String(details.tabId)];
   if (!limit) {
@@ -642,27 +739,30 @@ async function interceptSessionVisit(details) {
 
 chrome.webNavigation.onBeforeNavigate.addListener((details) => { void interceptSessionVisit(details); });
 
-const bumpUsage = () => serializeUsage(() => recordUsage());
+const bumpUsage = () => startUsageForFocusedTab({ validate: true });
 
 async function setActive(tabId, url) {
   void tabId; void url;
   return startUsageForFocusedTab();
 }
 
-async function startUsageForFocusedTab() {
+async function startUsageForFocusedTab({ validate = false } = {}) {
   return serializeUsage(async () => {
     try {
       const win = await chrome.windows.getLastFocused();
-      const { [KEY.audioUsage]: includeAudio = false } = await chrome.storage.local.get(KEY.audioUsage);
-      const audible = includeAudio ? await chrome.tabs.query({ audible: true }) : [];
+      const idleState = await chrome.idle.queryState(60);
       let active = null;
-      if (win.focused) {
+      if (win.focused && idleState === "active") {
         [active] = await chrome.tabs.query({ active: true, windowId: win.id });
       }
-      const tracks = selectUsageTabs(active, audible, includeAudio, hostOf);
+      const browserSession = await browserSessionReady;
+      const tracks = selectUsageTabs(active, hostOf).map((track) => ({ ...track, browserSession }));
+      if (validate && !tracks.length) {
+        await chrome.storage.local.set({ [KEY.activeUsage]: [] });
+      }
       await recordUsage(Date.now(), true);
       await chrome.storage.local.set({ [KEY.activeUsage]: tracks });
-    } catch { await recordUsage(Date.now(), true); }
+    } catch { await chrome.storage.local.set({ [KEY.activeUsage]: [] }); }
   });
 }
 
@@ -689,6 +789,8 @@ chrome.windows.onFocusChanged.addListener((winId) => {
   void winId;
   void startUsageForFocusedTab();
 });
+chrome.idle.setDetectionInterval(60);
+chrome.idle.onStateChanged.addListener(() => { void startUsageForFocusedTab(); });
 chrome.tabs.onUpdated.addListener((_tabId, info, tab) => {
   if (info.audible !== undefined || (info.url && tab.active)) void startUsageForFocusedTab();
 });
@@ -697,6 +799,7 @@ chrome.tabs.onUpdated.addListener((_tabId, info, tab) => {
 /** Everything the popup needs, already evaluated by the shared engine. */
 async function snapshot() {
   const usageTodaySeconds = await currentUsageSeconds();
+  const deviceId = await usageDeviceId();
   const state = await loadState();
   const now = Date.now();
   const verdict = evaluateBlocking(state, now, usageTodaySeconds);
@@ -732,21 +835,35 @@ async function snapshot() {
     }
   } catch { /* no active tab — the popup just shows nothing for it */ }
 
-  const { [KEY.blocks]: blocks = {}, [KEY.lastSync]: lastSync = null, [KEY.theme]: theme = "sculpted-bronze" } =
+  const { [KEY.blocks]: blocks = {}, [KEY.lastSync]: lastSync = null, [KEY.theme]: theme = "violet-dusk" } =
     await chrome.storage.local.get([KEY.blocks, KEY.lastSync, KEY.theme]);
   const usageStore = (await chrome.storage.local.get(KEY.usage))[KEY.usage] || {};
+  const activityRows = (await accountActivity()).filter((row) => row.kind === "website");
+  const activityToday = activityRows.filter((row) => row.day === today).map((row) => ({ host: row.name, kind: row.kind, seconds: Math.floor(row.seconds) })).sort((a, b) => b.seconds - a.seconds);
+  const usageHourly = Array.from({ length: 24 }, (_, hour) => ({
+    day: `${today}:${hour}`, label: `${hour}:00`,
+    seconds: activityRows.filter((row) => row.day === today).reduce((sum, row) => sum + (Number(row.hourly?.[hour]) || 0), 0),
+  }));
   const usageWeek = Array.from({ length: 7 }, (_, i) => {
     const date = new Date(`${today}T00:00:00.000Z`);
     date.setUTCDate(date.getUTCDate() - (6 - i));
     const day = date.toISOString().slice(0, 10);
-    const seconds = Object.values(usageStore[day] || {}).reduce((n, value) => n + (Number(value) || 0), 0);
+    const seconds = activityRows.filter((row) => row.day === day).reduce((sum, row) => sum + row.seconds, 0);
     return { day, label: date.toLocaleDateString(undefined, { weekday: "short", timeZone: "UTC" }), seconds };
   });
   const blockedToday = Object.entries(blocks[today] || {})
     .map(([host, count]) => ({ host, count }))
     .sort((a, b) => b.count - a.count)
     .slice(0, 5);
-  const usageLimits = state.usageLimits.filter((limit) => limit.kind === "website").map((limit) => {
+  const desktopCache = (await chrome.storage.local.get(KEY.desktopUsage))[KEY.desktopUsage];
+  const desktopUsageToday = account?.authUserId && desktopCache?.owner === account.authUserId && desktopCache.day === today
+    ? desktopCache.rows || [] : [];
+  const usageLimits = state.usageLimits.map((limit) => {
+    if (limit.kind === "app") {
+      const usedSeconds = desktopUsageToday.filter((row) => row.name.toLowerCase().replace(/\.exe$/, "") === limit.target.toLowerCase().replace(/\.exe$/, ""))
+        .reduce((sum, row) => sum + row.seconds, 0);
+      return { ...limit, usedSeconds, reached: limit.mode === "daily" && usedSeconds >= limit.dailyLimitMinutes * 60 };
+    }
     if (limit.mode === "session") return { ...limit, usedSeconds: 0, reached: false };
     const usedSeconds = Object.entries(usageTodaySeconds).reduce((total, [host, seconds]) =>
       total + (hostMatches(limit.target, host) ? Number(seconds) || 0 : 0), 0);
@@ -756,6 +873,8 @@ async function snapshot() {
   return {
     version: chrome.runtime.getManifest().version,
     theme,
+    appearance: (await chrome.storage.local.get("northAppearance")).northAppearance || null,
+    interfaceSounds: Boolean((await chrome.storage.local.get("northInterfaceSounds")).northInterfaceSounds),
     account,
     signedIn: Boolean(account?.authUserId),
     authConfigured: northAuth.isConfigured(),
@@ -773,8 +892,12 @@ async function snapshot() {
     usageLimits,
     appRules: grouped.apps.map(withReason),
     usageToday,
+    desktopUsageToday,
+    activityToday,
+    usageHourly,
+    usageDeviceId: deviceId,
     usageWeek,
-    trackBackgroundAudio: Boolean((await chrome.storage.local.get(KEY.audioUsage))[KEY.audioUsage]),
+    trackBackgroundAudio: false,
     activeCounts: { websites: verdict.websites.length, apps: verdict.apps.length },
   };
 }
@@ -793,7 +916,32 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
         await bumpUsage();
         const store = (await chrome.storage.local.get(KEY.usage))[KEY.usage] || {};
         const result = aggregateUsageRange(store, String(msg.from || ""), String(msg.to || ""));
-        return result ? { ok: true, ...result } : { ok: false, error: "Choose a valid date range." };
+        if (!result) return { ok: false, error: "Choose a valid date range." };
+        const extra = [];
+        try {
+          const ctx = await authContext();
+          if (ctx) {
+            for (let offset = 0; ; offset += 1000) {
+              const page = await postgrest(`/usage_records?user_id=eq.${ctx.uid}&day=gte.${result.from}&day=lte.${result.to}&select=day,kind,name,seconds,device_id,hourly&order=day,kind,name,device_id&limit=1000&offset=${offset}`, { jwt: ctx.jwt, url: ctx.url, anonKey: ctx.anonKey });
+              extra.push(...(page || []));
+              if (!page || page.length < 1000) break;
+            }
+          }
+        } catch { /* Offline: retain available cached activity. */ }
+        const rows = (await accountActivity(true, extra)).filter((row) => row.kind === "website" && row.day >= result.from && row.day <= result.to);
+        const totals = new Map();
+        for (const row of rows) {
+          const key = `${row.kind}:${row.name}`;
+          const previous = totals.get(key) || { host: row.name, kind: row.kind, seconds: 0 };
+          previous.seconds += Math.floor(row.seconds); totals.set(key, previous);
+        }
+        const chart = result.from === result.to
+          ? Array.from({ length: 24 }, (_, hour) => ({ day: `${result.from}:${hour}`, label: `${hour}:00`, seconds: rows.reduce((sum, row) => sum + (Number(row.hourly?.[hour]) || 0), 0) }))
+          : Array.from({ length: result.days }, (_, index) => {
+            const day = new Date(Date.parse(`${result.from}T00:00:00Z`) + index * 86400000).toISOString().slice(0, 10);
+            return { day, label: day.slice(5), seconds: rows.filter((row) => row.day === day).reduce((sum, row) => sum + row.seconds, 0) };
+          });
+        return { ok: true, ...result, usage: [...totals.values()].sort((a, b) => b.seconds - a.seconds), chart };
       }
 
       case "clearUsageHistory": {
@@ -808,7 +956,8 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
       }
 
       case "setBackgroundAudio": {
-        await chrome.storage.local.set({ [KEY.audioUsage]: Boolean(msg.enabled) });
+        // Old popups may still send this preference; background usage is disabled.
+        await chrome.storage.local.set({ [KEY.audioUsage]: false });
         await startUsageForFocusedTab();
         return { ok: true };
       }
@@ -980,12 +1129,20 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
 
       /** Manual "sync now" from the popup, and the web page's "north-sync". */
       case "syncAccount":
-        return await syncAccount();
+        await syncUsage();
+        { const result = await syncAccount(); await syncRules('manual-refresh'); return result; }
+
+      case "focusRank": {
+        const ctx = await authContext();
+        if (!ctx) return { ok: false, reason: 'signed_out' };
+        const rows = await postgrest('/rpc/focus_rankings', { method: 'POST', body: { limit_count: 3 }, jwt: ctx.jwt, url: ctx.url, anonKey: ctx.anonKey });
+        return { ok: true, mine: (rows || []).find(row => row.un === ctx.account.un) || null, rows };
+      }
 
       default:
         return { ok: false, error: "unknown message" };
     }
-  })().then(sendResponse);
+  })().then(sendResponse).catch(error => sendResponse({ ok: false, reason: 'sync_failed', error: error.message || 'Sync could not finish. Please retry.' }));
   return true; // async response
 });
 
@@ -1048,6 +1205,7 @@ chrome.runtime.onMessageExternal.addListener((msg, sender, sendResponse) => {
       // A web message can be the first thing that wakes this MV3 worker. Wait
       // for GoTrue to restore its persisted session before reading auth state.
       await authReady;
+      await syncUsage();
       const synced = await syncAccount();
       await syncRules("web-request");
       sendResponse({ ok: true, version, synced: synced.ok, reason: synced.reason || null });
@@ -1075,7 +1233,9 @@ chrome.runtime.onMessageExternal.addListener((msg, sender, sendResponse) => {
       return { target: limit.target, dailyLimitMinutes: limit.dailyLimitMinutes, usedSeconds: Math.floor(usedSeconds), reached: usedSeconds >= limit.dailyLimitMinutes * 60 };
     });
     sendResponse(verdict.action === "usage"
-      ? { ok: true, usageToday, blockedToday, usageLimits }
+      ? { ok: true, usageToday, blockedToday, usageLimits, accountId: account?.authUserId || null,
+          usageDeviceId: await usageDeviceId(),
+          hourlyToday: ((await chrome.storage.local.get(KEY.hourlyUsage))[KEY.hourlyUsage] || {})[today] || {} }
       : {
           ok: true, version,
           signedIn: Boolean(account?.authUserId),
@@ -1088,7 +1248,7 @@ chrome.runtime.onMessageExternal.addListener((msg, sender, sendResponse) => {
 });
 
 // Keep the running tab's clock honest and the verdict fresh from the start.
-chrome.alarms.create(ALARMS.usageFlush, { periodInMinutes: 1 });
+chrome.alarms.create(ALARMS.usageFlush, { periodInMinutes: .5 });
 loadState().then(() => syncRules("boot"));
 // Signed in from a previous run: reconcile with the account as soon as the
 // session is restored (the authReady promise above resolves first).

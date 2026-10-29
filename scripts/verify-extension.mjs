@@ -45,7 +45,7 @@
  */
 import { spawn, execSync } from "node:child_process";
 import { createServer } from "node:http";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync, mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { createHash } from "node:crypto";
 
@@ -153,21 +153,55 @@ function findBrowser() {
   ].filter(Boolean).find((p) => existsSync(p)) || null;
 }
 
-/** Launch a Chromium with the extension loaded. Works on Chromium ≤ 136 only. */
+/** Install into a throwaway profile through Chromium's supported CDP pipe. */
+async function installTestExtension(browser, profile, extDir, port) {
+  const child = spawn(browser, [
+    `--user-data-dir=${profile}`, `--remote-debugging-port=${port}`, "--remote-debugging-pipe", "--enable-unsafe-extension-debugging",
+    "--headless=new", "--no-first-run", "--no-default-browser-check", "about:blank",
+  ], { stdio: ["ignore", "ignore", "ignore", "pipe", "pipe"] });
+  let buffer = "";
+  let seq = 0;
+  const pending = new Map();
+  child.stdio[4].on("data", (chunk) => {
+    buffer += chunk.toString();
+    let boundary;
+    while ((boundary = buffer.indexOf("\0")) >= 0) {
+      const message = buffer.slice(0, boundary); buffer = buffer.slice(boundary + 1);
+      if (!message) continue;
+      const response = JSON.parse(message);
+      const request = pending.get(response.id);
+      if (!request) continue;
+      pending.delete(response.id); clearTimeout(request.timer);
+      if (response.error) request.reject(new Error(response.error.message));
+      else request.resolve(response.result);
+    }
+  });
+  const send = (method, params = {}) => new Promise((resolve, reject) => {
+    const id = ++seq;
+    const timer = setTimeout(() => { pending.delete(id); reject(new Error(`${method}: browser pipe timed out`)); }, 20000);
+    pending.set(id, { resolve, reject, timer });
+    child.stdio[3].write(JSON.stringify({ id, method, params }) + "\0");
+  });
+  try {
+    const result = await send("Extensions.loadUnpacked", { path: extDir });
+    console.log(`installed NORTH in temporary profile (${result.id})`);
+    child.northSend = send;
+    return child;
+  } catch (error) {
+    for (const request of pending.values()) { clearTimeout(request.timer); request.reject(new Error("test browser closed")); }
+    if (child.exitCode === null) child.kill();
+    throw error;
+  }
+}
+
+/** Start the installed test profile with a local debugging port. */
 async function launchWithExtension(endpoint, port) {
   const browser = findBrowser();
   if (!browser) throw new Error("no Chromium-family browser found (set CHROME=/path/to/chrome)");
   const extDir = join(process.cwd(), "apps", "extension");
   const profile = join(process.env.TEMP || process.env.TMPDIR || "/tmp", `north-verify-${Date.now()}`);
-  console.log(`launching ${browser}\n  --load-extension=${extDir}\n  (honoured by Chromium ≤ 136; newer builds ignore it)`);
-  const child = spawn(browser, [
-    `--user-data-dir=${profile}`,
-    `--remote-debugging-port=${port}`,
-    `--load-extension=${extDir}`,
-    `--disable-extensions-except=${extDir}`,
-    "--headless=new", "--no-first-run", "--no-default-browser-check", "--disable-gpu",
-    "about:blank",
-  ], { stdio: "ignore" });
+  const child = await installTestExtension(browser, profile, extDir, port);
+  console.log(`launching ${browser} (temporary extension test profile)`);
   return {
     child,
     stop: async () => {
@@ -226,7 +260,13 @@ async function main() {
 
   let north = null;
   try {
-    // The service worker may be asleep; open the popup, which wakes it.
+    // MV3 workers may already be suspended. Open the pinned popup before
+    // enumerating targets; otherwise a loaded extension can look absent.
+    const initialManifest = JSON.parse(readFileSync(join(process.cwd(), "apps", "extension", "manifest.json"), "utf8"));
+    const hash = createHash("sha256").update(Buffer.from(initialManifest.key, "base64")).digest("hex").slice(0, 32);
+    const initialId = [...hash].map((digit) => String.fromCharCode(97 + parseInt(digit, 16))).join("");
+    await openTab(`chrome-extension://${initialId}/popup.html`);
+    await sleep(1200);
     north = await findNorth(endpoint);
     if (!north) {
       // Nothing to probe yet: any extension page forces the worker to start.
@@ -337,17 +377,34 @@ async function main() {
       const list = await getJson(`${endpoint}/json/list`);
       return list.find((x) => x.id === id2)?.url || "";
     };
-    const navigate = async (url) => {
+    const navigate = async (url, blocked = false) => {
       const t = await openTab(url);
-      await sleep(1600);
-      return currentUrl(t.id);
+      const deadline = Date.now() + 12000;
+      let actual = "";
+      do {
+        await sleep(250);
+        actual = await currentUrl(t.id);
+        if (blocked ? actual.startsWith(`chrome-extension://${id}/blocked.html`) : actual === url) return actual;
+      } while (Date.now() < deadline);
+      return actual;
     };
 
-    const blockedTo = await navigate(`http://localhost:${webPort}/`);
+    const localRule = await send({ type: "addSite", host: "localhost" });
+    check("the local navigation test has an active rule", localRule?.ok === true && filters(await rules()).includes("||localhost^"));
+    const blockedTo = await navigate(`http://localhost:${webPort}/`, true);
     check("a blocked navigation lands on NORTH's block page",
       blockedTo.startsWith(`chrome-extension://${id}/blocked.html`), blockedTo);
     check("the block page names the blocked domain", blockedTo.includes("d=localhost"), blockedTo);
     check("the block page carries the reason", /[?&]r=always/.test(blockedTo), blockedTo);
+    if (blockedTo.startsWith(`chrome-extension://${id}/blocked.html`)) {
+      const target = (await getJson(`${endpoint}/json/list`)).find((item) => item.url === blockedTo);
+      const blockPage = await connect(target.webSocketDebuggerUrl);
+      const shot = await blockPage.send("Page.captureScreenshot", { format: "png" });
+      const dir = join(process.cwd(), ".freebuff", "artifacts");
+      mkdirSync(dir, { recursive: true });
+      writeFileSync(join(dir, "north-block-page.png"), Buffer.from(shot.data, "base64"));
+      blockPage.ws.close();
+    }
 
     const allowedTo = await navigate(`http://127.0.0.1:${webPort}/`);
     check("a host that is not on the list still loads normally", allowedTo === `http://127.0.0.1:${webPort}/`, allowedTo);
@@ -360,10 +417,17 @@ async function main() {
     check("the removed domain loads again", afterRemoval === `http://localhost:${webPort}/`, afterRemoval);
 
     // ── 6. the extension restarts and keeps enforcing ────────────────────
+    await send({ type: "addSite", host: "localhost" });
     check("a rule is in place before the restart", filters(await rules()).includes("||youtube.com^"));
     await popup.evaluate("chrome.runtime.reload(); return true;").catch(() => {});
     await sleep(2500);
-    const again = await findNorth(endpoint);
+    const wake = await openExtensionPage(endpoint, id, "popup.html");
+    wake.ws.close();
+    let again = await findNorth(endpoint);
+    if (!again && launched?.child?.northSend) {
+      console.log("reload diagnostic:", JSON.stringify(await launched.child.northSend("Extensions.getExtensions").catch((error) => ({ error: error.message }))));
+      console.log("reload targets:", (await getJson(`${endpoint}/json/list`)).map((target) => target.url).join(" | "));
+    }
     check("the extension comes back after a reload", Boolean(again), again?.id || "not found");
     if (again) {
       const popup2 = await openExtensionPage(endpoint, again.id, "popup.html");

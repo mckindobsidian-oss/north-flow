@@ -39,6 +39,8 @@
  */
 
 import { normalizeState, defaultBlocking } from "../shared/blocking.js";
+import { newestAppearance } from "./appearance.js";
+import { mergeStreakDays } from "./streak.js";
 import {
   boardToRow, docFromProfile, isUuid, keepLocalTaskMeta, profileFromRows, pushable,
   rowToBoard, rowToSession, sessionToRow, signature, taskToRow,
@@ -98,10 +100,15 @@ export function createSync({ store, client = null, configured = Boolean(client) 
   let userId = null;         // auth uid — the identity every table is scoped to
   let un = null;             // the device-stable username key
   let applying = false;      // true while pulling, so pulls never echo back as writes
+  let localRevision = 0;
   let timer = null;
   let running = null;        // in-flight flush, so concurrent calls collapse
+  let realtimeChannel = null;
+  let realtimePullTimer = null;
+  let realtimeGeneration = 0;
   const skipped = new Set(); // non-uuid legacy ids already reported
   const pushed = new Map();  // key → fingerprint of the last successful push
+  let queueWrites = Promise.resolve();
 
   const ready = () => Boolean(configured && client && userId);
   const log = (...a) => { try { console.warn("[north sync]", ...a); } catch { /* no console */ } };
@@ -111,33 +118,55 @@ export function createSync({ store, client = null, configured = Boolean(client) 
   // the same record then survives a restart on the web (localStorage) and on
   // the phone (AsyncStorage) with no platform branch here. The queue key is
   // not `pushable`, so writing it never re-enqueues itself.
+  async function readOwnedQueue(owner, username) {
+    const scoped = await store.get(`${QUEUE_KEY}:${owner}`);
+    if (Array.isArray(scoped)) return scoped;
+    // Retain pre-upgrade pending edits, but never import another username's
+    // keys. Leave the old queue intact as a recovery copy.
+    const legacy = await store.get(QUEUE_KEY);
+    return Array.isArray(legacy) ? legacy.filter((key) => key === `u:${username}` || key === `bd:${username}` || key.startsWith(`fs:${username}:`)) : [];
+  }
   async function readQueue() {
+    const owner = userId;
+    const username = un;
+    await queueWrites;
     try {
-      const list = await store.get(QUEUE_KEY);
-      return Array.isArray(list) ? list : [];
+      return await readOwnedQueue(owner, username);
     } catch { return []; }
   }
-  async function writeQueue(list) {
+  async function writeQueue(list, owner = userId) {
     try {
       const uniq = [...new Set(list)];
-      if (!uniq.length) await store.del(QUEUE_KEY);
-      else await store.set(QUEUE_KEY, uniq);
+      await store.set(`${QUEUE_KEY}:${owner}`, uniq);
     } catch { /* no storage — the push simply is not retried */ }
   }
   async function enqueue(key) {
-    const q = await readQueue();
-    if (!q.includes(key)) await writeQueue([...q, key]);
+    const owner = userId;
+    const username = un;
+    queueWrites = queueWrites.catch(() => {}).then(async () => {
+      const q = await readOwnedQueue(owner, username);
+      if (!q.includes(key)) await writeQueue([...q, key], owner);
+    });
+    await queueWrites;
   }
 
   // ── pushes ──────────────────────────────────────────────────────────────
   async function pushProfileRow(profile) {
     const doc = docFromProfile(profile);
+    const remote = await client.from("profiles").select("settings,updated_at").eq("id", userId).maybeSingle();
+    if (remote.error) return false;
+    doc.appearance = newestAppearance(doc.appearance, remote.data?.settings?.appearance);
+    if (doc.appearance) doc.theme = doc.appearance.id;
+    doc.streakDays = mergeStreakDays(remote.data?.settings?.streakDays, doc.streakDays);
     const base = {
       id: userId,
+      onboarding_complete: true,
       name: doc.name || un,
       email: doc.email || null,
       settings: {
         pm: doc.pm,
+        appearance: doc.appearance,
+        streakDays: doc.streakDays,
         // Schema-shaped copies of the blocking settings, alongside the complete
         // client document, so neither direction loses information.
         blockDuringFocus: doc.blocking.settings.blockDuringFocus,
@@ -154,6 +183,22 @@ export function createSync({ store, client = null, configured = Boolean(client) 
     // `un` carries a unique constraint. Send it first so the leaderboard and
     // every other client agree on who this is; if somebody else already holds
     // that name, fall back to leaving the row's existing value alone.
+    // Compare the settings we read: a concurrent device edit stays queued for
+    // another merge instead of overwriting the winning wallpaper/streak data.
+    if (remote.data) {
+      const update = (row) => {
+        let query = client.from("profiles").update(row).eq("id", userId);
+        query = query.eq("updated_at", remote.data.updated_at);
+        return query.select("id");
+      };
+      const result = await update({ ...base, un });
+      if (!result.error) return Array.isArray(result.data) && result.data.length > 0;
+      if (result.error.code === "23505") {
+        const fallback = await update(base);
+        return !fallback.error && Array.isArray(fallback.data) && fallback.data.length > 0;
+      }
+      return false;
+    }
     const first = await client.from("profiles").upsert({ ...base, un }, { onConflict: "id" });
     if (!first.error) return true;
     if (first.error.code === "23505" || /duplicate key/i.test(first.error.message || "")) {
@@ -214,23 +259,6 @@ export function createSync({ store, client = null, configured = Boolean(client) 
     if (ids.length) del = del.not("id", "in", `(${ids.join(",")})`);
     const { error: delErr } = await del;
     if (delErr) log("task prune failed:", delErr.message);
-    return true;
-  }
-
-  /** Friendships are usernames; the leaderboard validates that they exist. */
-  async function pushFriends(profile) {
-    const friends = (profile.friends || []).map((friend_un) => ({
-      user_id: userId, friend_un, status: "accepted",
-    }));
-    if (friends.length) {
-      const { error } = await client.from("friends").upsert(friends, { onConflict: "user_id,friend_un" });
-      if (error) { log("friend push failed:", error.message); return false; }
-    }
-    const names = friends.map((f) => f.friend_un);
-    let del = client.from("friends").delete().eq("user_id", userId);
-    if (names.length) del = del.not("friend_un", "in", `(${names.join(",")})`);
-    const { error: delErr } = await del;
-    if (delErr) { log("friend prune failed:", delErr.message); return false; }
     return true;
   }
 
@@ -319,9 +347,8 @@ export function createSync({ store, client = null, configured = Boolean(client) 
       const boardsOk = await pushBoards(un); // tasks reference these
       const profileOk = await pushProfileRow(profile);
       const tasksOk = await pushTasks(profile);
-      const friendsOk = await pushFriends(profile);
       await pushBlockingMirror(profile);
-      const ok = boardsOk && profileOk && tasksOk && friendsOk;
+      const ok = boardsOk && profileOk && tasksOk;
       // Keep failed profile writes queued. Marking the signature here even on
       // error caused the retry to be treated as a no-op and dropped, including
       // edits to the account-owned website limits in profiles.settings.
@@ -351,20 +378,35 @@ export function createSync({ store, client = null, configured = Boolean(client) 
     if (!ready()) return { ok: false, reason: "not signed in" };
     if (running) return running;
     running = (async () => {
+      const owner = userId;
+      const username = un;
       const keys = await readQueue();
       const failed = [];
       for (const key of keys) {
+        if (owner !== userId) return { ok: false, reason: "account changed" };
         try {
+          const before = signature(key, await store.get(key));
           const ok = await pushOne(key);
-          if (!ok) failed.push(key);
+          if (!ok || before !== signature(key, await store.get(key))) failed.push(key);
         } catch (err) {
           failed.push(key);
           log(`push threw for ${key}:`, err?.message || err);
         }
       }
-      await writeQueue(failed);
+      let added = [];
+      // Serialize acknowledgement with enqueues. Otherwise a newly saved
+      // limit can be removed by an older upload finishing at the same time.
+      queueWrites = queueWrites.catch(() => {}).then(async () => {
+        const queued = await readOwnedQueue(owner, username);
+        added = queued.filter((key) => !keys.includes(key));
+        for (const key of keys) {
+          if (!failed.includes(key) && pushed.get(key) !== signature(key, await store.get(key))) failed.push(key);
+        }
+        await writeQueue([...failed, ...added], owner);
+      });
+      await queueWrites;
       if (failed.length) log(`${failed.length} change(s) still pending — will retry (${reason}).`);
-      return { ok: failed.length === 0, pending: failed.length };
+      return { ok: failed.length === 0 && added.length === 0, pending: failed.length + added.length };
     })().finally(() => { running = null; });
     return running;
   }
@@ -384,6 +426,9 @@ export function createSync({ store, client = null, configured = Boolean(client) 
    */
   async function pull(username = un) {
     if (!ready()) return false;
+    const owner = userId;
+    const revision = localRevision;
+    if ((await readQueue()).length) return false;
     const key = username || un;
     applying = true;
     try {
@@ -395,7 +440,7 @@ export function createSync({ store, client = null, configured = Boolean(client) 
         client.from("profiles").select("id, un, name, email, created_at, settings").eq("id", userId).maybeSingle(),
         client.from("boards").select("id, name, position").eq("user_id", userId).order("position"),
         client.from("tasks").select("*").eq("user_id", userId).order("position"),
-        client.from("friends").select("friend_un").eq("user_id", userId),
+        client.from("friends").select("friend_un,status").eq("user_id", userId),
         client.from("daily_focus").select("day, focus_s").eq("user_id", userId).gte("day", since),
         client.from("focus_sessions").select("*").eq("user_id", userId).gte("started_at", midnight.toISOString()),
       ]);
@@ -403,12 +448,13 @@ export function createSync({ store, client = null, configured = Boolean(client) 
       const firstError = [profileRes, boardRes, taskRes, friendRes, dailyRes, sessionRes].find((r) => r.error);
       if (firstError) { log("pull failed:", firstError.error.message); return false; }
       if (!profileRes.data) return false; // no server record yet
+      if (owner !== userId || revision !== localRevision) return false;
 
       const profile = profileFromRows({
         un: key,
         profileRow: profileRes.data,
         taskRows: taskRes.data || [],
-        friendRows: friendRes.data || [],
+        friendRows: (friendRes.data || []).filter((row) => row.status === "accepted"),
       });
       // This write REPLACES the local record, and a project without migration
       // 005 returns no difficulty/description — so without this, every pull
@@ -416,6 +462,9 @@ export function createSync({ store, client = null, configured = Boolean(client) 
       // keepLocalTaskMeta: server values still win wherever they exist.
       const prevLocal = await store.get(`u:${key}`).catch(() => null);
       profile.tasks = keepLocalTaskMeta(profile.tasks, prevLocal?.tasks);
+      profile.appearance = newestAppearance(profile.appearance, prevLocal?.appearance);
+      if (profile.appearance) profile.theme = profile.appearance.id;
+      profile.streakDays = mergeStreakDays(profile.streakDays, prevLocal?.streakDays);
       // A running focus window is device state: this device owns its timer, and
       // a pull landing mid-session must not silently cancel a countdown that is
       // still ticking (the window is published again on the next push, which is
@@ -424,14 +473,15 @@ export function createSync({ store, client = null, configured = Boolean(client) 
       if (localFocus && Number(localFocus.endAt) > Date.now()) {
         profile.blocking = { ...profile.blocking, focus: localFocus };
       }
-      await store.set(`u:${key}`, profile);
-      await store.set(`bd:${key}`, (boardRes.data || []).map(rowToBoard));
+      if (owner !== userId || revision !== localRevision) return false;
+      await store.set(`u:${key}`, profile, false, { remote: true });
+      await store.set(`bd:${key}`, (boardRes.data || []).map(rowToBoard), false, { remote: true });
 
       // Today's raw sessions (what the Focus screen lists) and the derived daily
       // totals (what the heatmap reads). daily_focus is written only by the
       // database, so the pulled numbers cannot have been chosen by a client.
       const today = ymd(new Date());
-      await store.set(`fs:${key}:${today}`, (sessionRes.data || []).map(rowToSession));
+      await store.set(`fs:${key}:${today}`, (sessionRes.data || []).map(rowToSession), false, { remote: true });
       for (const row of dailyRes.data || []) {
         await store.set(`fo:${key}:${row.day}`, { s: row.focus_s });
       }
@@ -467,6 +517,66 @@ export function createSync({ store, client = null, configured = Boolean(client) 
       await flush("bootstrap");
     }
     return pulled;
+  }
+
+  /**
+   * Keep the signed-in web client warm when another North client changes the
+   * account. This is an invalidation signal: the normal pull remains the
+   * source of truth, while the existing minute/visibility refreshes remain
+   * the offline and reconnect fallback.
+   */
+  function stopRealtime() {
+    realtimeGeneration += 1;
+    clearTimeout(realtimePullTimer);
+    realtimePullTimer = null;
+    const channel = realtimeChannel;
+    realtimeChannel = null;
+    if (!channel) return;
+    try {
+      const result = typeof client?.removeChannel === "function"
+        ? client.removeChannel(channel)
+        : channel.unsubscribe?.();
+      result?.catch?.(() => {});
+    } catch { /* a closed channel is already the desired state */ }
+  }
+
+  function startRealtime(onChange = () => {}) {
+    stopRealtime();
+    if (!ready() || typeof client?.channel !== "function") return false;
+    const accountId = userId;
+    const generation = realtimeGeneration;
+    const notify = (table) => {
+      if (generation === realtimeGeneration && accountId === userId) onChange({ table });
+    };
+    try {
+      const channel = client
+        .channel(`north-account-${accountId}`)
+        .on(
+          "postgres_changes",
+          { event: "*", schema: "public", table: "profiles", filter: `id=eq.${accountId}` },
+          () => {
+            clearTimeout(realtimePullTimer);
+            realtimePullTimer = setTimeout(() => notify("profiles"), 250);
+          }
+        )
+        .on(
+          "postgres_changes",
+          { event: "*", schema: "public", table: "usage_records", filter: `user_id=eq.${accountId}` },
+          () => notify("usage_records")
+        )
+        .subscribe((status, error) => {
+          // A rejoined channel cannot replay changes missed while offline.
+          if (status === "SUBSCRIBED") notify("profiles");
+          if (status === "CHANNEL_ERROR" || status === "TIMED_OUT") {
+            log(`realtime ${status.toLowerCase()}`, error?.message || "");
+          }
+        });
+      realtimeChannel = channel;
+      return true;
+    } catch (error) {
+      log("realtime subscription failed:", error?.message || error);
+      return false;
+    }
   }
 
   /**
@@ -511,22 +621,22 @@ export function createSync({ store, client = null, configured = Boolean(client) 
    * account arriving from the Sign in screen is signed back out with a clear
    * message instead of silently becoming a sign-up.
    */
-  async function hasAccount() {
-    if (!ready()) return false;
+  async function hasAccount(accountId = userId) {
+    if (!configured || !client || !accountId) return null;
     try {
       const { data, error } = await client
         .from("profiles")
-        .select("id")
-        .eq("id", userId)
+        .select("id, onboarding_complete")
+        .eq("id", accountId)
         .maybeSingle();
       if (error) {
         log("account probe failed:", error.message);
-        return false; // fail closed: treat as unknown → sign-up intent
+        return null; // unavailable is not evidence that an account is missing
       }
-      return Boolean(data);
+      return Boolean(data) && data.onboarding_complete !== false;
     } catch (e) {
       log("account probe threw:", e?.message || e);
-      return false;
+      return null;
     }
   }
 
@@ -537,13 +647,23 @@ export function createSync({ store, client = null, configured = Boolean(client) 
    * Returns the RPC's result string, or throws a display-ready message.
    */
   async function friendAction(requesterUn, action) {
-    if (!ready()) throw new Error("not signed in");
+    if (!configured || !client) throw new Error("Account services are unavailable in this build.");
+    const { data: auth, error: authError } = await client.auth.getUser();
+    if (authError || !auth?.user) throw new Error("Sign in to your North account to add friends. A local profile is not an account session.");
+    if (userId && userId !== auth.user.id) throw new Error("Your account changed. Refresh North before sending a request.");
+    if (!userId) {
+      const { data: profile, error } = await client.from("profiles").select("un").eq("id", auth.user.id).maybeSingle();
+      if (error || !profile?.un) throw new Error("Your account profile could not be loaded. Refresh North and try again.");
+      userId = auth.user.id;
+      un = profile.un;
+    }
     const { data, error } = await client.rpc("friend_action", {
       p_requester_un: requesterUn,
       p_action: action,
     });
     if (error) throw new Error(error.message);
     // Refresh my own edges + the friend feed after any mutation.
+    await flush("friend action").catch(() => {});
     await pull().catch(() => {});
     return data;
   }
@@ -570,12 +690,14 @@ export function createSync({ store, client = null, configured = Boolean(client) 
    */
   async function leaderboard(limit = 25) {
     if (!ready()) return null;
-    const { data, error } = await client.rpc("leaderboard", { limit_count: limit });
+    let { data, error } = await client.rpc("focus_rankings", { limit_count: limit });
+    if (error?.code === 'PGRST202' || error?.code === '42883') ({ data, error } = await client.rpc("leaderboard", { limit_count: limit }));
     if (error) { log("leaderboard failed:", error.message); return null; }
     const entries = (data || []).map((r) => ({
       un: r.un,
       name: r.name || r.un,
       fm: Number(r.focus_minutes) || 0,
+      rank: Number(r.rank) || null,
       activeDays: Number(r.active_days) || 0,
       last: r.last_active || "",
       // Completed tasks and streaks are not part of the public aggregate, so
@@ -612,20 +734,23 @@ export function createSync({ store, client = null, configured = Boolean(client) 
     attach(session) {
       const nextUserId = session?.userId || null;
       const changed = nextUserId !== userId;
+      if (changed) stopRealtime();
       userId = nextUserId;
       un = session?.un || null;
       if (changed) {
-        // Anything already queued belongs to the previous account.
-        writeQueue([]);
+        // Keep each account's offline edits across restarts. Clearing the
+        // queue here discarded unsynced limits on every session restore.
         pushed.clear();
       }
     },
-    detach() { userId = null; un = null; pushed.clear(); },
+    detach() { stopRealtime(); userId = null; un = null; pushed.clear(); },
     ready,
     flush,
     flushProfile,
     pull,
     bootstrap,
+    startRealtime,
+    stopRealtime,
     peekTheme,
     hasAccount,
     friendAction,
@@ -634,7 +759,8 @@ export function createSync({ store, client = null, configured = Boolean(client) 
     pendingCount: readQueue,
     /** Queue a local change for the server. Called by `S.set`. */
     afterWrite(key) {
-      if (!ready() || applying || !pushable(key)) return;
+      if (!ready() || !pushable(key)) return;
+      localRevision += 1;
       enqueue(key).then(() => {
         clearTimeout(timer);
         timer = setTimeout(() => { flush("debounced").catch(() => {}); }, 900);

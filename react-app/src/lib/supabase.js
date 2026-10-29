@@ -1,4 +1,5 @@
 import { createClient } from '@supabase/supabase-js';
+import { desktopOAuthDestination } from './desktop-oauth.js';
 
 // Public (by design) values from react-app/.env.local — see SETUP.md.
 const supabaseUrl = import.meta.env.VITE_SUPABASE_URL;
@@ -44,7 +45,12 @@ export const supabaseConfigured =
   !placeholder(supabaseAnonKey);
 
 export const supabase = supabaseConfigured
-  ? createClient(normalizedUrl, supabaseAnonKey)
+  ? createClient(normalizedUrl, supabaseAnonKey, {
+      auth: {
+        ...(globalThis.__TAURI__ ? { flowType: 'pkce' } : {}),
+        detectSessionInUrl: !desktopOAuthDestination(globalThis.location?.search || ''),
+      },
+    })
   : null;
 
 if (!supabaseConfigured) {

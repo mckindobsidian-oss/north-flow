@@ -1,6 +1,15 @@
 import { useState, useEffect, useRef } from "react";
 import { createPortal } from "react-dom";
 import FocusTaskPicker from "./FocusTaskPicker.jsx";
+import DateField from "./DateField.jsx";
+import { SOUND_OPTIONS, primeSound, playSound } from "./lib/sounds.js";
+import { newestAppearance, validAppearance } from "./lib/appearance.js";
+import { localDay, streakSummary, STREAK_MILESTONES, recordStreakDay } from "./lib/streak.js";
+import { startDesktopBridge, readDesktopUsage, applyDesktopBlocking, refreshDesktopSync } from "./lib/desktop.js";
+import { readUsageHistory, mergeUsageSources } from "./lib/usage-history.js";
+import { isSystemApp } from "./shared/activity.js";
+import { desktopGoogleSignIn } from "./lib/desktop-oauth.js";
+import { isDesktop } from "./lib/desktop.js";
 import {
   Calendar, Check, ChevronLeft, ChevronRight, Compass,
   Home as HomeIcon, ListChecks, LogOut, Pause, PenLine, Play,
@@ -182,7 +191,7 @@ const ENVS = {
   },
 };
 const ENV_IDS = Object.keys(ENVS);
-const DEFAULT_ENV_ID = "sculpted-bronze";
+const DEFAULT_ENV_ID = "violet-dusk";
 const isKnownEnv = (id) => ENV_IDS.includes(id);
 const THEME_INTENT_KEY = "north:pending-theme";
 const readThemeIntent = (un) => {
@@ -213,10 +222,10 @@ const photoGlass = (adj) => {
   const dark = !((adj.bright || 1) >= 1.1 && (adj.overlay || 0) <= 0.15);
   return {
     dark,
-    tint: "rgba(255,255,255,.10)",
-    tintCard: "rgba(255,255,255,.14)",
-    tintSubtle: "rgba(255,255,255,.07)",
-    tintStrong: "rgba(255,255,255,.20)",
+    tint: dark ? "rgba(22,24,32,.88)" : "rgba(248,249,253,.92)",
+    tintCard: dark ? "rgba(24,26,34,.88)" : "rgba(250,251,255,.92)",
+    tintSubtle: dark ? "rgba(19,21,29,.82)" : "rgba(242,244,250,.90)",
+    tintStrong: dark ? "rgba(26,28,36,.96)" : "rgba(250,251,255,.98)",
     lumA: "rgba(255, 255, 255, 0.08)",
     lumB: dark ? "rgba(255, 255, 255, 0.015)" : "rgba(255, 255, 255, 0.015)",
     hi: dark ? "rgba(255, 255, 255, 0.14)" : "rgba(255, 255, 255, 0.14)",
@@ -240,10 +249,10 @@ const photoGlass = (adj) => {
 //   tertiary — no blur (sits close to the plane), faintest edges, recessed
 //   sheet    — the deepest lens of all: text-bearing floating chrome
 const envGlass = (e) => ({
-  tint: "rgba(255,255,255,.10)",
-  tintCard: "rgba(255,255,255,.14)",
-  tintSubtle: "rgba(255,255,255,.07)",
-  tintStrong: "rgba(255,255,255,.20)",
+  tint: e.dark ? "rgba(22,24,32,.88)" : "rgba(248,249,253,.92)",
+  tintCard: e.dark ? "rgba(24,26,34,.88)" : "rgba(250,251,255,.92)",
+  tintSubtle: e.dark ? "rgba(19,21,29,.82)" : "rgba(242,244,250,.90)",
+  tintStrong: e.dark ? "rgba(26,28,36,.96)" : "rgba(250,251,255,.98)",
   lumA: "rgba(255,255,255,.08)",
   lumB: e.dark ? "rgba(255,255,255,.015)" : "rgba(255,255,255,.015)",
   hi: "rgba(255,255,255,.22)",
@@ -270,9 +279,9 @@ const paletteOf = (envId) => {
   return {
     dark,
     bg: dark ? NORTH_TOKENS.bg : "#EDF0F7",
-    surf: "rgba(255,255,255,.10)",
-    card: "rgba(255,255,255,.13)",
-    card2: "rgba(255,255,255,.07)",
+    surf: dark ? "rgba(22,24,32,.88)" : "rgba(248,249,253,.92)",
+    card: dark ? "rgba(24,26,34,.88)" : "rgba(250,251,255,.92)",
+    card2: dark ? "rgba(19,21,29,.82)" : "rgba(242,244,250,.90)",
     border: "rgba(255,255,255,.24)",
     acc: e.acc,
     // Ink that stays readable on a filled accent control. Declared per
@@ -280,7 +289,7 @@ const paletteOf = (envId) => {
     onAcc: e.onAcc || "#FFFFFF",
     accDim: dark ? "rgba(255, 255, 255, 0.08)" : "rgba(255, 255, 255, 0.5)",
     ok: dark ? "#30D158" : "#34C759", warn: dark ? "#FF9F0A" : "#FF9500", err: dark ? "#FF453A" : "#FF3B30",
-    txt: dark ? "#F2F2F7" : "#1C1C1E", sub: dark ? "#B7B8C0" : "#56565C", muted: dark ? "#85868E" : "#77777D",
+    txt: dark ? "#F8F9FC" : "#1C1C1E", sub: dark ? "#D1D3DE" : "#454650", muted: dark ? "#B6B9C7" : "#62636D",
     sh1: dark ? "0 1px 2px rgba(0, 0, 0, 0.5)" : "0 1px 2px rgba(31, 41, 66, 0.06)",
     sh2: dark ? "0 2px 6px rgba(0, 0, 0, 0.45)" : "0 2px 6px rgba(31, 41, 66, 0.08)",
     sh3: dark ? "0 -6px 12px rgba(0, 0, 0, 0.45)" : "0 -6px 12px rgba(31, 41, 66, 0.05)",
@@ -291,7 +300,8 @@ const paletteForCustomPhoto = (adj) => {
   return { ...paletteOf(DEFAULT_ENV_ID), dark: g.dark, acc: g.acc,
     // The photo path keeps the blue accent, which takes white ink.
     onAcc: "#FFFFFF",
-    txt: g.dark ? "#F2F2F7" : "#1C1C1E", sub: g.dark ? "#98989E" : "#6D6D72", muted: g.dark ? "#636366" : "#AFAFB6",
+    txt: g.dark ? "#F8F9FC" : "#1C1C1E", sub: g.dark ? "#D1D3DE" : "#454650", muted: g.dark ? "#B6B9C7" : "#62636D",
+    surf: g.tint, card: g.tintCard, card2: g.tintSubtle,
     border: g.edge, bg: g.dark ? "#0C0D12" : "#EDF0F7" };
 };
 let K = paletteOf(DEFAULT_ENV_ID); // active palette — App reassigns on environment change
@@ -436,13 +446,14 @@ const S = {
     try { const r = await pick().get(key, shared); return r ? JSON.parse(r.value) : null; }
     catch { return null; }
   },
-  async set(key, val, shared = false) {
-    try { await pick().set(key, JSON.stringify(val), shared); } catch {}
+  async set(key, val, shared = false, options = {}) {
+    await pick().set(key, JSON.stringify(val), shared);
     // Mirror the change to the account's backend — a no-op when signed out or
     // when no Supabase project is configured, and never awaited: recording a
     // task must not wait on a network round trip. `sync.js` queues the push and
     // retries it until it lands, so an offline edit is not lost.
-    if (SYNC) SYNC.afterWrite(key, shared);
+    if (SYNC && !options.remote) SYNC.afterWrite(key, shared);
+    window.dispatchEvent(new CustomEvent("north:store", { detail: { key } }));
   },
   async del(key, shared = false) {
     try { await pick().delete(key, shared); } catch {}
@@ -560,7 +571,7 @@ const sectionTitle = () => ({ fontSize: 14.5, fontWeight: 650, color: K.txt, let
 const G = () => (
   <style>{`
   /* One material language across page surfaces, with stronger glass at the edges. */
-  :root { --north-bg:${NORTH_TOKENS.bg}; --north-surface:${NORTH_TOKENS.surface}; --north-surface-raised:${NORTH_TOKENS.surfaceRaised}; --north-border:${NORTH_TOKENS.border}; --north-accent:${NORTH_TOKENS.accent}; --north-radius-sm:${NORTH_TOKENS.radiusSm}px; --north-radius-md:${NORTH_TOKENS.radiusMd}px; --north-radius-lg:${NORTH_TOKENS.radiusLg}px; }
+  :root { --north-reading-surface:${K.card}; --north-ink:${K.txt}; --north-secondary-ink:${K.sub}; --north-bg:${NORTH_TOKENS.bg}; --north-surface:${NORTH_TOKENS.surface}; --north-surface-raised:${NORTH_TOKENS.surfaceRaised}; --north-border:${NORTH_TOKENS.border}; --north-accent:${NORTH_TOKENS.accent}; --north-radius-sm:${NORTH_TOKENS.radiusSm}px; --north-radius-md:${NORTH_TOKENS.radiusMd}px; --north-radius-lg:${NORTH_TOKENS.radiusLg}px; }
   .gcard { border-radius: ${NORTH_TOKENS.radiusLg}px; color: ${K.txt}; background: linear-gradient(145deg, ${GK.lumA}, ${GK.lumB} 52%, transparent), ${GK.tintCard}; border: 1px solid ${GK.edge}; backdrop-filter: blur(${GLASS.blurSubtle}px) saturate(135%); -webkit-backdrop-filter: blur(${GLASS.blurSubtle}px) saturate(135%); box-shadow: inset 0 1px 0 ${GK.hi}, inset 0 -2px 0 rgba(30,40,70,.08), 0 2px 6px rgba(20,30,65,.08), 0 18px 42px -20px rgba(20,30,65,.30); transform: translateZ(0); }
   .gsheet { border-radius: ${NORTH_TOKENS.radiusLg}px; color: ${K.txt}; background: linear-gradient(145deg, ${GK.lumA}, ${GK.lumB}), ${GK.tintStrong}; border: 1px solid ${GK.edge}; box-shadow: inset 0 1px 0 ${GK.hi}, ${GK.shFloat}; }
   .mtrl { backdrop-filter: blur(${GLASS.blurPrimary}px) saturate(140%); -webkit-backdrop-filter: blur(${GLASS.blurPrimary}px) saturate(140%); }
@@ -685,7 +696,7 @@ const G = () => (
   .focus-history-row > span:nth-child(2) { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .focus-history-row time { color: ${K.sub}; font-variant-numeric: tabular-nums; }
   @media (max-width: 640px) {
-    .focus-inner { padding: 22px 14px 84px; }
+     .focus-inner { padding: 22px 14px 156px; }
     .focus-heading { align-items: center; flex-direction: row; }
     .focus-ambient-actions { justify-content: flex-start; width: 100%; }
     .focus-mini-action span { display: none; }
@@ -926,7 +937,7 @@ const G = () => (
   .north-mobile-nav { display:none; }
   @media (max-width: 800px) {
     .north-sidebar { display:none; }
-    .north-content { padding-left:0; }
+     .north-content { padding-left:0; padding-bottom:132px; }
     /* Full-bleed dock that WRAPS instead of a strip that scrolls: eight tabs
        in a single row of handsets either shrink past usability or hide
        destinations off the right edge. Two rows of four keep every tab
@@ -1137,6 +1148,11 @@ function Auth({ noAccount, onDismissNoAccount, envId, envPhoto, extensionConnect
     setBusy(true); setErr(""); setInfo("");
     try {
       try { sessionStorage.setItem("north:oauth-intent", mode === "register" ? "signup" : "signin"); } catch {}
+      if (isDesktop()) {
+        await desktopGoogleSignIn(supabase);
+        setBusy(false);
+        return;
+      }
       const { error } = await supabase.auth.signInWithOAuth({
         provider: "google",
         options: { redirectTo: window.location.origin + window.location.pathname },
@@ -1148,7 +1164,7 @@ function Auth({ noAccount, onDismissNoAccount, envId, envPhoto, extensionConnect
         try { sessionStorage.removeItem("north:oauth-intent"); } catch {}
         setErr(
           /provider|unsupported|invalid/i.test(error.message || "")
-            ? "Google sign-in isn't enabled on this project yet. Enable the Google provider in Supabase → Authentication → Providers (see SETUP.md)."
+            ? "Google sign-in is temporarily unavailable. Please try email sign-in."
             : error.message
         );
         setBusy(false);
@@ -1460,9 +1476,53 @@ function SetPassword({ onDone, envId, envPhoto }) {
 // HOME
 // ══════════════════════════════════════════════════════════════════════════
 const PCOL = () => ({ low: K.ok, medium: K.warn, high: K.err });
+async function recordStreak(un, kind) {
+  const summary = await recordStreakDay(S, un, kind);
+  const profile = await S.get(PROFILE_KEY(un));
+  if (summary?.lit && profile?.pm?.interfaceSounds) setTimeout(() => playSound(STREAK_MILESTONES.some(([n]) => n === summary.current) ? "achievement" : "streak", profile.pm.soundVolume ?? .5), 1100);
+}
+
+function StreakProgress({ user, go }) {
+  const [expanded, setExpanded] = useState(false);
+  const [selectedBadge, setSelectedBadge] = useState(null);
+  const [now, setNow] = useState(() => new Date());
+  useEffect(() => { const id = setInterval(() => setNow(new Date()), 60000); return () => clearInterval(id); }, []);
+  const progress = streakSummary(user.streakDays, now);
+  const goals = Number(Boolean(progress.today.focus)) + Number(Boolean(progress.today.task));
+  return <section className={`north-streak${progress.lit ? " is-lit" : ""}`} style={{ ...card(), marginBottom: 22 }}>
+    <div className="north-streak-kicker">YOUR DAILY SPARK <span>PERSONAL BEST · {progress.best} DAYS</span></div>
+    <button className="b" type="button" onClick={() => setExpanded(!expanded)} aria-expanded={expanded} style={{ color: K.txt, width: "100%", textAlign: "left", display: "flex", alignItems: "center", gap: 14 }}>
+      <span className="north-streak-flame" aria-hidden="true">🔥</span>
+      <span style={{ flex: 1 }}><strong className="north-streak-count">{progress.current}<small> day{progress.current === 1 ? '' : 's'}</small></strong><span style={{ display: "block", color: K.sub, marginTop: 4, fontSize: 13 }}>{progress.lit ? "Flame lit. A little focus, a little closer." : goals ? "Halfway there. One more goal lights your flame." : progress.current ? "Keep your flame going. Make today count." : "Every streak starts with a spark."}</span></span>
+      <span style={{ color: K.sub, fontSize: 12 }}>{expanded ? "Hide rewards −" : "Rewards +"}</span>
+    </button>
+    <div className="north-streak-goals">
+      <button type="button" className={`b${progress.today.focus ? ' complete' : ''}`} onClick={() => go('focus')}>{progress.today.focus ? '✓' : '◷'}<span>Complete a Pomodoro<small>{progress.today.focus ? 'Today’s focus goal complete' : 'Give one session your full attention'}</small></span><span aria-hidden="true">→</span></button>
+      <button type="button" className={`b${progress.today.task ? ' complete' : ''}`} onClick={() => go('tasks')}>{progress.today.task ? '✓' : '○'}<span>Finish one task<small>{progress.today.task ? 'Today’s task goal complete' : 'Turn a small intention into progress'}</small></span><span aria-hidden="true">→</span></button>
+    </div>
+    <progress className="north-daily-progress" aria-label={`${goals} of 2 daily streak goals complete`} max="2" value={goals} />
+    <div className="north-streak-week">{Array.from({ length: 7 }, (_, index) => {
+      const date = new Date(now); date.setDate(date.getDate() - 6 + index); const key = localDay(date);
+      const earned = user.streakDays?.[key]?.focus && user.streakDays?.[key]?.task;
+      const partial = user.streakDays?.[key]?.focus || user.streakDays?.[key]?.task;
+      return <span key={key} title={`${key}: ${earned ? "Both goals completed" : partial ? "One goal completed" : "Daily goals incomplete"}`}><small>{index === 6 ? 'Today' : date.toLocaleDateString(undefined, { weekday: "short" })}</small><span className={`${earned ? 'lit' : ''}${index === 6 ? ' current' : ''}`}>{earned ? "🔥" : partial ? '◐' : date.getDate()}</span></span>;
+    })}</div>
+    {expanded && <><div className="north-achievements">{STREAK_MILESTONES.map(([days, name]) => <button onClick={() => setSelectedBadge([days, name])} type="button" className={`b north-badge${progress.best >= days ? " earned" : ""}`} key={days} aria-pressed={selectedBadge?.[0] === days} title={`${name}: ${days} consecutive days with a full Pomodoro and task`}><span aria-hidden="true">{progress.best >= days ? "🔥" : "◇"}</span><strong>{name}</strong><small>{progress.best >= days ? "Earned" : `${Math.min(progress.current, days)} / ${days} days`}</small><progress aria-label={`${name} progress`} max={days} value={Math.min(progress.best >= days ? days : progress.current, days)} /></button>)}</div>
+      {selectedBadge && <div role="status" className="north-badge-detail"><strong>{selectedBadge[1]}</strong><p>{progress.best >= selectedBadge[0] ? `Unlocked by reaching a ${selectedBadge[0]}-day streak. This achievement stays earned.` : `Complete a full Pomodoro and a task on ${selectedBadge[0]} consecutive days. You have ${progress.current} consecutive days so far.`}</p><button type="button" className="b" onClick={() => setSelectedBadge(null)} style={{ color: K.acc }}>Close details</button></div>}
+      <p style={{ fontSize: 11, color: K.sub, marginBottom: 0 }}>Daily progress starts when these completions are recorded. Skipped sessions do not count.</p></>}
+  </section>;
+}
 
 function Home({ user, go }) {
   const [stats, setStats] = useState({ fm: 0, done: 0, total: 0, streak: 0, sessions: 0, lifeMin: 0, lifeSessions: 0 });
+  const [activityRevision, setActivityRevision] = useState(0);
+  useEffect(() => {
+    const refresh = (event) => {
+      if (event.detail?.key === `fo:${user.un}:${today()}` || event.detail?.key === `fs:${user.un}:${today()}`) setActivityRevision((n) => n + 1);
+    };
+    window.addEventListener("north:store", refresh);
+    return () => window.removeEventListener("north:store", refresh);
+  }, [user.un]);
 
   useEffect(() => {
     Promise.all([
@@ -1488,7 +1548,7 @@ function Home({ user, go }) {
     S.get(`fs:${user.un}:${today()}`).then((recs) => {
       if (Array.isArray(recs)) setStats((s) => ({ ...s, sessions: recs.length }));
     });
-  }, [user.id, user.un]);
+  }, [user.id, user.un, user.tasks, user.blocking?.focus, activityRevision]);
 
   const h     = new Date().getHours();
   const greet = h < 12 ? "Good morning" : h < 17 ? "Good afternoon" : "Good evening";
@@ -1500,9 +1560,10 @@ function Home({ user, go }) {
       {/* Greeting */}
       <div style={{ marginBottom: 22 }}>
         <div style={{ fontSize: 13.5, color: K.sub, letterSpacing: 0.1 }}>{greet},</div>
-        <div style={{ fontSize: 30, fontWeight: 700, color: K.txt, marginTop: 3, letterSpacing: "-0.02em" }}>
+        <div style={{ fontSize: "clamp(30px, 4vw, 44px)", fontWeight: 700, color: K.txt, marginTop: 3, letterSpacing: "-0.035em" }}>
           {user.name} 👋
         </div>
+        <p style={{ color: K.sub, fontSize: 14, lineHeight: 1.6, margin: "10px 0 0" }}>A little less distraction. A little more of what matters.</p>
       </div>
 
       {/* The three big stat cards are gone. The same real numbers — today's
@@ -1514,7 +1575,6 @@ function Home({ user, go }) {
         {[
           { k: "f", v: `${stats.fm}m`, t: "focused today" },
           stats.total > 0 ? { k: "t", v: `${stats.done}/${stats.total}`, t: "tasks today" } : null,
-          stats.streak > 0 ? { k: "s", v: `${stats.streak}d`, t: "streak" } : null,
           stats.sessions > 0 ? { k: "n", v: String(stats.sessions), t: stats.sessions === 1 ? "session" : "sessions" } : null,
           // Lifetime productivity, from the same server aggregate the
           // leaderboard ranks on. One line, still no wall of cards.
@@ -1531,6 +1591,7 @@ function Home({ user, go }) {
         ))}
       </div>
 
+      <StreakProgress user={user} go={go} />
       {/* Quick start — the primary glass surface: translucent accent material
           with a specular edge, and the play control as lit glass, not a flat
           blue rectangle. */}
@@ -1544,8 +1605,8 @@ function Home({ user, go }) {
           display: "flex", alignItems: "center", justifyContent: "space-between",
         }}>
         <span style={{ display: "flex", flexDirection: "column", gap: 3 }}>
-          <span style={{ fontSize: 18, fontWeight: 680, color: K.txt, letterSpacing: "-0.015em" }}>Start focus session</span>
-          <span style={{ fontSize: 12.5, color: K.sub }}>{user.pm?.w || 25} min · Pomodoro</span>
+          <span style={{ fontSize: 22, fontWeight: 680, color: K.txt, letterSpacing: "-0.025em" }}>Make room for deep work</span>
+          <span style={{ fontSize: 13, color: K.sub }}>Start a {user.pm?.w || 25}-minute focus session →</span>
         </span>
         <span className="gacc" style={{
           width: 52, height: 52, borderRadius: 17, flexShrink: 0,
@@ -1673,7 +1734,6 @@ function AnalyticsPanel({ user }) {
           ))}
         </div>
       )}
-      <DistractionStrip user={user} />
     </div>
 
   );
@@ -1736,7 +1796,6 @@ function DistractionStrip({ user }) {
   }, [user.id, user.un]);
 
   const todayMinutes = Math.round((d?.today || []).reduce((n, e) => n + (Number(e.seconds) || Number(e.minutes) * 60 || 0), 0) / 60);
-  const blockedAttempts = (d?.blockedToday || []).reduce((n, e) => n + (Number(e.count) || 0), 0);
   if (!d || (!d.totalMinutes && !todayMinutes && !d.installed)) return null;
   return (
     <div style={{ ...card(), marginTop: 10, padding: "10px 14px" }}>
@@ -1759,7 +1818,6 @@ function DistractionStrip({ user }) {
           Top: {d.topDomains.slice(0, 3).map((t) => `${t.domain} (${t.minutes}m)`).join(" · ")}
         </div>
       )}
-      {blockedAttempts > 0 && <div style={{ fontSize: 11, color: K.sub, marginTop: 4 }}>{blockedAttempts} blocked attempts today</div>}
     </div>
   );
 }
@@ -1774,13 +1832,29 @@ function DistractionStrip({ user }) {
 const MAP_WKS = 26;
 const MAP_AL  = ["3D", "6B", "94", "BC", "E6"]; // accent alpha steps, low → high (wide spread so quiet vs strong days read instantly)
 const HM_LVL  = (min) => min <= 0 ? 0 : min < 15 ? 1 : min < 30 ? 2 : min < 50 ? 3 : min < 80 ? 4 : 5;
-const HM_LBL  = ["0", "15m", "30m", "50m", "80m+"].map((s, i) => (i === 0 ? "none" : s));
+const HM_LBL  = ["None", "1–14m", "15–29m", "30–49m", "50–79m", "80m+"];
 const HM_DOW  = ["M", "", "W", "", "F", "", ""];
 const ymdOf   = (d) => `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}`;
 
 function ActivityMap({ user }) {
   const [mins, setMins] = useState(null); // Map "YYYY-MM-DD" → focused minutes
+  const [revision, setRevision] = useState(0);
+  const [selectedDay, setSelectedDay] = useState(null);
   const td = today();
+
+  useEffect(() => {
+    let pending;
+    const refresh = (event = {}) => {
+      if (!event.detail?.key || event.detail.key.startsWith(`fo:${user.un}:`)) {
+        clearTimeout(pending);
+        pending = setTimeout(() => setRevision((n) => n + 1), 120);
+      }
+    };
+    window.addEventListener("north:store", refresh);
+    window.addEventListener("north:sync", refresh);
+    const timer = setInterval(refresh, 60000);
+    return () => { clearTimeout(pending); clearInterval(timer); window.removeEventListener("north:store", refresh); window.removeEventListener("north:sync", refresh); };
+  }, [user.un]);
 
   useEffect(() => {
     let dead = false;
@@ -1800,7 +1874,7 @@ function ActivityMap({ user }) {
       if (!dead) setMins(map);
     })();
     return () => { dead = true; };
-  }, [user.un]);
+  }, [user.un, revision, td]);
 
   const now = new Date();
   const wk  = new Date(now.getFullYear(), now.getMonth(), now.getDate());
@@ -1823,8 +1897,7 @@ function ActivityMap({ user }) {
   // is actually drawn — it used to say "last 4 weeks" over a 16-week grid.
   let sumAll = 0;
   if (mins) {
-    const cut = ymdOf(new Date(now.getTime() - (MAP_WKS * 7 - 1) * 86400000));
-    for (const [k, v] of mins) if (k >= cut) sumAll += v;
+    for (const [k, v] of mins) if (k >= ymdOf(start) && k <= td) sumAll += v;
   }
   const fmtH = (min) => (min >= 60 ? `${Math.floor(min / 60)}h${min % 60 ? ` ${min % 60}m` : ""}` : `${min}m`);
 
@@ -1834,7 +1907,7 @@ function ActivityMap({ user }) {
         <div>
           <div style={{ fontSize: 19, fontWeight: 750, color: K.txt, letterSpacing: "-0.02em" }}>Focus activity</div>
           <div style={{ fontSize: 12, color: K.sub, marginTop: 3 }}>
-            Every day you focused over the last {MAP_WKS} weeks — darker means more focused minutes that day
+            Your last {MAP_WKS} weeks of focus. Select a day to explore it.
           </div>
         </div>
         <div style={{ fontSize: 12.5, color: K.sub, textAlign: "right" }}>
@@ -1866,14 +1939,15 @@ function ActivityMap({ user }) {
               const lvl = HM_LVL(m);
               const fut = ymd > td;
               return (
-                <button key={ymd} type="button" tabIndex={-1} className="b"
+                <button key={ymd} type="button" disabled={fut} className="b"
+                  onClick={() => setSelectedDay(ymd)} aria-pressed={selectedDay === ymd}
                   aria-hidden={fut ? "true" : undefined}
                   aria-label={fut ? undefined : m ? `${ymd} · ${m} min focused` : `${ymd} · no focus`}
                   title={fut ? undefined : m ? `${ymd} — ${m} min focused` : `${ymd} — no focus`}
                   style={{
                     width: 22, height: 22, borderRadius: 5, padding: 0, flexShrink: 0,
                     background: fut ? "transparent" : lvl === 0 ? K.border : K.acc + MAP_AL[lvl - 1],
-                    boxShadow: ymd === td && !fut ? `inset 0 0 0 2px ${K.acc}` : "none",
+                    boxShadow: selectedDay === ymd ? `inset 0 0 0 2px ${K.txt}` : ymd === td && !fut ? `inset 0 0 0 2px ${K.acc}` : "none",
                     cursor: fut ? "default" : "pointer",
                   }} />
               );
@@ -1898,6 +1972,7 @@ function ActivityMap({ user }) {
           <span style={{ fontSize: 10.5, color: K.muted }}>More focused</span>
         </div>
       </div>
+      {selectedDay && <p role="status" style={{ color: K.txt, fontSize: 13 }}>{selectedDay} · {fmtH(mins?.get(selectedDay) || 0)} focused</p>}
       {mins && sumAll === 0 && (
         <div style={{ ...card(), marginTop: 8, textAlign: "center", color: K.muted, fontSize: 11, padding: "12px 10px" }}>
           Complete focus sessions to light up your activity map
@@ -1926,17 +2001,19 @@ let focusTaskSeed = null;
 // A small split-flap display for Screensaver. It owns only wall-clock time;
 // the Pomodoro countdown remains in Focus and is never duplicated here.
 function FlipDigit({ value }) {
+  const last = useRef(value);
   const [shown, setShown] = useState(value);
   const [previous, setPrevious] = useState(value);
   const [flipping, setFlipping] = useState(false);
   useEffect(() => {
-    if (value === shown) return undefined;
-    setPrevious(shown);
+    if (value === last.current) return undefined;
+    setPrevious(last.current);
+    last.current = value;
     setShown(value);
     setFlipping(true);
-    const id = setTimeout(() => setFlipping(false), 460);
+    const id = setTimeout(() => setFlipping(false), 700);
     return () => clearTimeout(id);
-  }, [value, shown]);
+  }, [value]);
   return <span className={`north-flip-digit${flipping ? " is-flipping" : ""}`} aria-hidden="true">
     <span className="north-flip-top">{shown}</span>
     <span className="north-flip-bottom">{shown}</span>
@@ -2080,12 +2157,19 @@ function ImmersiveFocus({ children, onExit, task, spotify, upcoming, envId, envP
   );
 }
 
-function Focus({ user, envId, envPhoto, go }) {
+function Focus({ user, envId, envPhoto, go, active = true }) {
   // Local copy of the timer profile so duration edits apply instantly and
   // persist to the user record; sound/notify flags ride along in the same
   // object so they stay per-device until real account settings exist.
   const [pm, setPm] = useState({ w: 25, sb: 5, lb: 15, sound: false, notify: false, ...(user.pm || {}) });
+  useEffect(() => { setPm((current) => ({ ...current, ...(user.pm || {}) })); }, [user.pm]);
   const [preferencesOpen, setPreferencesOpen] = useState(false);
+  const [completionNote, setCompletionNote] = useState("");
+  useEffect(() => {
+    if (!completionNote) return;
+    const id = setTimeout(() => { setCompletionNote(""); setImmersive(false); }, 3500);
+    return () => clearTimeout(id);
+  }, [completionNote]);
   const DURS = [pm.w * 60, pm.sb * 60, pm.lb * 60];
 
   // The task the next session will be attached to, if any. Purely optional:
@@ -2102,6 +2186,13 @@ function Focus({ user, envId, envPhoto, go }) {
   });
   const taskR = useRef(taskSel); taskR.current = taskSel;
   useEffect(() => {
+    if (active && focusTaskSeed && openTasks.some((task) => task.id === focusTaskSeed)) {
+      setTaskSel(focusTaskSeed);
+      taskR.current = focusTaskSeed;
+      focusTaskSeed = null;
+    }
+  }, [active, tasks]);
+  useEffect(() => {
     if (taskSel && !tasks.some((task) => task.id === taskSel && !task.completed)) {
       setTaskSel(null);
       taskR.current = null;
@@ -2110,10 +2201,14 @@ function Focus({ user, envId, envPhoto, go }) {
 
   const completeLinkedTask = async () => {
     if (!taskR.current) return;
+    if (user.pm?.interfaceSounds) primeSound();
     const updated = tasks.map((task) => task.id === taskR.current ? { ...task, completed: true } : task);
     setTasks(updated);
     const profile = (await S.get(PROFILE_KEY(user.un))) || {};
     await S.set(PROFILE_KEY(user.un), { ...profile, tasks: updated });
+    await recordStreak(user.un, "task");
+    setCompletionNote("Task complete. Nicely done.");
+    if (profile.pm?.interfaceSounds) playSound("task", profile.pm?.soundVolume ?? .5);
     const leaderboard = (await S.get(`lb:${user.un}`, true)) || {};
     await S.set(`lb:${user.un}`, { ...leaderboard, tc: updated.filter((task) => task.completed).length }, true);
     setTaskSel(null);
@@ -2134,7 +2229,6 @@ function Focus({ user, envId, envPhoto, go }) {
   const endR   = useRef(0);     // wall-clock deadline (ms) while running
   const startR = useRef(0);     // when the current session began running
   const run    = useRef(null);  // latest `finish`, called by the ticking interval
-  const audioR = useRef(null);  // shared WebAudio context for the chime
   const titleR = useRef(typeof document !== "undefined" ? document.title : "");
 
   // Publish the running session into the shared blocking state that the
@@ -2180,38 +2274,14 @@ function Focus({ user, envId, envPhoto, go }) {
   const primeAudio = () => {
     // Create the audio context inside a user gesture (Start click) so the
     // end-of-session chime isn't blocked by autoplay policies.
-    try {
-      const AC = window.AudioContext || window.webkitAudioContext;
-      if (AC && !audioR.current) audioR.current = new AC();
-    } catch {}
-  };
-  const chime = () => {
-    try {
-      const AC = window.AudioContext || window.webkitAudioContext;
-      if (!AC) return;
-      if (!audioR.current) audioR.current = new AC();
-      const a = audioR.current;
-      if (a.state === "suspended") a.resume().catch(() => {});
-      const tone = (f, delay) => {
-        const o = a.createOscillator(), g = a.createGain();
-        o.type = "sine"; o.frequency.value = f;
-        const t = a.currentTime + delay;
-        g.gain.setValueAtTime(0.0001, t);
-        g.gain.exponentialRampToValueAtTime(0.15, t + 0.03);
-        g.gain.exponentialRampToValueAtTime(0.0001, t + 0.9);
-        o.connect(g); g.connect(a.destination);
-        o.start(t); o.stop(t + 1);
-      };
-      tone(880, 0);
-      tone(1174.66, 0.22); // soft two-note chime
-    } catch { /* audio unavailable — no-op */ }
+    primeSound();
   };
   const endNotify = (p) => {
-    if (pm.sound) chime();
+    if (user.pm?.interfaceSounds) playSound(p === 0 ? (user.pm?.soundId || "focus") : "break", user.pm?.soundVolume ?? .5);
     if (!pm.notify || typeof Notification === "undefined") return;
     try {
       if (Notification.permission === "granted")
-        new Notification("NORTH", { body: p === 0 ? "Focus session complete — time for a break." : "Break's over — ready to focus?" });
+        new Notification("NORTH", { icon: "/north-logo.png", body: p === 0 ? "Focus session complete — time for a break." : "Break's over — ready to focus?" });
     } catch {}
   };
   // Duration editing lives on the Settings page (the single customization
@@ -2249,6 +2319,7 @@ function Focus({ user, envId, envPhoto, go }) {
           ...(taskR.current ? { taskId: taskR.current } : {}),
         });
         await S.set(key, recs);
+        if (!skip && elapsed >= DURS[0] - 1) await recordStreak(user.un, "focus");
         setHist(recs);
         setSess(recs.length); sR.current = recs.length;
       }
@@ -2265,6 +2336,10 @@ function Focus({ user, envId, envPhoto, go }) {
     }
     startR.current = 0;
     setOn(false);
+    if (!skip) {
+      setCompletionNote(p === 0 ? "Pomodoro complete. Take a well-earned break." : "Break complete. Ready for your next focus session.");
+      setImmersive(false);
+    }
   };
   run.current = finish;
 
@@ -2401,6 +2476,7 @@ function Focus({ user, envId, envPhoto, go }) {
       <>
         {G()}
         <ImmersiveFocus onExit={exitFocusMode} task={taskTitle} envId={envId} envPhoto={envPhoto} spotify={spotifyMini}>
+          {completionNote && <p role="status" className="north-completion-note" style={{ color: K.ok }}>{completionNote}</p>}
           {dial}
         </ImmersiveFocus>
       </>
@@ -2470,6 +2546,8 @@ function Focus({ user, envId, envPhoto, go }) {
       {/* Coming up — today's next Google event(s), quiet context beside the
           timer. Read-only, deduped by the shared cache; never touches timing. */}
       {/* Phase tabs */}
+      {phaseTabs}
+      {completionNote && <p role="status" className="north-completion-note" style={{ color: K.ok, textAlign: "center" }}>{completionNote}</p>}
       {/* Ring — North Glass focus centerpiece: a glass dial carrying the
           countdown. Timer logic untouched; presentation only. */}
       <div className="focus-hero" style={{ display: "flex", justifyContent: "center", marginBottom: 28 }}>
@@ -2696,7 +2774,13 @@ function Tasks({ user, go }) {
     setDueText(taskDateText(task.due || ""));
     setDueError("");
   };
-  const toggle = (id) => persist(tasks.map((t) => t.id === id ? { ...t, completed: !t.completed } : t));
+  const toggle = async (id) => {
+    const completing = tasks.some((task) => task.id === id && !task.completed);
+    if (completing && user.pm?.interfaceSounds) primeSound();
+    await persist(tasks.map((t) => t.id === id ? { ...t, completed: !t.completed } : t));
+    if (completing) await recordStreak(user.un, "task");
+    if (completing && user.pm?.interfaceSounds) playSound("task", user.pm?.soundVolume ?? .5);
+  };
   const del    = (id) => { if (editId === id) closeForm(); persist(tasks.filter((t) => t.id !== id)); };
 
   // Upcoming is distinguished by being strictly in the future; Today carries
@@ -2920,7 +3004,7 @@ function Cal({ user }) {
 
   return (
     <div className="npage">
-      <div style={{ color: K.sub, fontSize: 12, marginBottom: 12 }}>Tasks scheduled in Tasks appear on their assigned day.</div>
+      <h2 style={{ ...pageTitle(), marginBottom: 18 }}>Calendar</h2>
       {/* Month header — Apple style: big title + chevrons + Today.
           Wraps (and scales its title down) rather than running off the right
           edge: a fixed 28px title plus the Today/chevron cluster is wider than
@@ -3217,9 +3301,9 @@ const formatFlowDuration = (value) => {
 
 function FlowUsage({ user, onTargets, hiddenSites = [], onToggleHidden }) {
   const currentDay = new Date().toISOString().slice(0, 10);
-  const [d, setD] = useState(null);
-  const [source, setSource] = useState("website");
-  const [hiddenDraft, setHiddenDraft] = useState("");
+  const yesterdayDay = new Date(Date.parse(`${currentDay}T00:00:00Z`) - 86400000).toISOString().slice(0, 10);
+  const [customRange, setCustomRange] = useState(false);
+  const [usageData, setD] = useState(null);
   const [rangeFrom, setRangeFrom] = useState(currentDay);
   const [rangeTo, setRangeTo] = useState(currentDay);
   useEffect(() => {
@@ -3230,22 +3314,42 @@ function FlowUsage({ user, onTargets, hiddenSites = [], onToggleHidden }) {
         const chartSince = new Date(Date.now() - 6 * 864e5).toISOString().slice(0, 10);
         const from = rangeFrom <= rangeTo ? rangeFrom : rangeTo;
         const to = rangeFrom <= rangeTo ? rangeTo : rangeFrom;
-        const since = from < chartSince ? from : chartSince;
-        const [extension, response] = await Promise.all([
+        const since = "1970-01-01"; // picker includes all observed account targets
+        const [extensionResponse, response, desktopRows] = await Promise.all([
           readExtensionUsage(),
-          supabaseConfigured && supabase
-            ? supabase.from("usage_records").select("day, kind, name, seconds").in("kind", ["website", "app"]).gte("day", since).lte("day", today)
-            : Promise.resolve({ data: [], error: null }),
+          readUsageHistory(supabaseConfigured && user.authLinked ? supabase : null, user.id, since, today).then((data) => ({ data, error: null })).catch((error) => ({ data: [], error })),
+          readDesktopUsage(user.id),
         ]);
         if (dead) return;
-        const rows = response.error ? [] : response.data || [];
+        const extension = extensionResponse.accountId === user.id ? extensionResponse : { installed: false };
+        const deviceId = await S.get("northUsageDeviceId");
+        const sources = new Map((response.error ? [] : response.data || []).map((row) => [`${row.day}:${row.kind}:${row.name}:${row.device_id || "legacy"}`, row]));
+        for (const row of desktopRows) {
+          sources.set(`${row.day}:app:${row.name}:${deviceId || "native-local"}`, { ...row, kind: "app", device_id: deviceId || "native-local" });
+        }
+        for (const row of extension.usageToday || []) {
+          sources.set(`${today}:website:${row.host}:${extension.usageDeviceId}`, {
+            day: today, kind: "website", name: row.host, device_id: extension.usageDeviceId,
+            seconds: row.seconds, hourly: extension.hourlyToday?.[row.host] || {},
+          });
+        }
+        const mergedRows = new Map(mergeUsageSources([...sources.values()])
+          .map((row) => [`${row.day}:${row.kind}:${row.name}`, row]));
+        const rows = [...mergedRows.values()];
         const byDomain = new Map();
         const byDay = new Map();
         const appByName = new Map();
         const appByDay = new Map();
         const websitesByDate = new Map();
         const appsByDate = new Map();
+        const hourly = Array(24).fill(0);
         for (const r of rows) {
+          if (isHiddenUsageSite(r.kind === "app" ? `app:${normalizeApp(r.name)}` : r.name, hiddenSites)) continue;
+          if (r.day === from) {
+            for (const [hour, seconds] of Object.entries(r.hourly || {})) {
+              if (/^(?:[0-9]|1[0-9]|2[0-3])$/.test(hour)) hourly[Number(hour)] += Number(seconds) || 0;
+            }
+          }
           if (r.kind === "app") {
             const name = String(r.name || "").trim();
             const secs = Math.max(0, Math.floor(Number(r.seconds)));
@@ -3263,7 +3367,7 @@ function FlowUsage({ user, onTargets, hiddenSites = [], onToggleHidden }) {
           const host = String(r.name || "").trim().toLowerCase().replace(/^www\./, "");
           const secs = Math.max(0, Math.floor(Number(r.seconds)));
           const day = String(r.day || "");
-          if (!host || isHiddenUsageSite(host, hiddenSites) || secs <= 0 || day >= today) continue;
+          if (!host || isHiddenUsageSite(host, hiddenSites) || secs <= 0 || day > today) continue;
           byDay.set(day, (byDay.get(day) || 0) + secs);
           const daySites = websitesByDate.get(day) || new Map();
           daySites.set(host, (daySites.get(host) || 0) + secs);
@@ -3274,18 +3378,20 @@ function FlowUsage({ user, onTargets, hiddenSites = [], onToggleHidden }) {
         }
         const todayRows = extension.installed ? extension.usageToday || [] : [];
         const visibleTodayRows = todayRows.filter((e) => !isHiddenUsageSite(e.host, hiddenSites));
-        const todaySecs = visibleTodayRows.reduce((n, e) => n + (Number(e.seconds) || Number(e.minutes) * 60 || 0), 0);
         for (const e of visibleTodayRows) {
           const host = String(e.host || "").trim().toLowerCase().replace(/^www\./, "");
           const seconds = Number(e.seconds) || Number(e.minutes) * 60 || 0;
           if (!host || seconds <= 0) continue;
-          const prev = byDomain.get(host) ?? { domain: host, seconds: 0 };
-          prev.seconds += seconds;
-          byDomain.set(host, prev);
           const todaySites = websitesByDate.get(today) || new Map();
-          todaySites.set(host, (todaySites.get(host) || 0) + seconds);
+          const previous = todaySites.get(host) || 0;
+          const latest = Math.max(previous, seconds);
+          todaySites.set(host, latest);
           websitesByDate.set(today, todaySites);
+          const prev = byDomain.get(host) ?? { domain: host, seconds: 0 };
+          prev.seconds += latest - previous;
+          byDomain.set(host, prev);
         }
+        const todaySecs = [...(websitesByDate.get(today)?.values() || [])].reduce((sum, seconds) => sum + seconds, 0);
         byDay.set(today, todaySecs);
         const aggregateRange = (dated) => {
           const totals = new Map();
@@ -3302,13 +3408,13 @@ function FlowUsage({ user, onTargets, hiddenSites = [], onToggleHidden }) {
         const selectedDays = Math.max(1, Math.round((Date.parse(`${to}T00:00:00Z`) - Date.parse(`${from}T00:00:00Z`)) / 864e5) + 1);
         const websiteRangeTargets = [...websiteRange.totals].map(([domain, seconds]) => ({ domain, seconds })).sort((a, b) => b.seconds - a.seconds);
         const appRangeTargets = [...appRange.totals].map(([domain, seconds]) => ({ domain, seconds })).sort((a, b) => b.seconds - a.seconds);
-        const daily = Array.from({ length: 7 }, (_, i) => {
-          const date = new Date(`${today}T00:00:00.000Z`);
-          date.setUTCDate(date.getUTCDate() - (6 - i));
+        const daily = Array.from({ length: selectedDays }, (_, i) => {
+          const date = new Date(`${from}T00:00:00.000Z`);
+          date.setUTCDate(date.getUTCDate() + i);
           const day = date.toISOString().slice(0, 10);
           return {
             day,
-            label: date.toLocaleDateString(undefined, { weekday: "short", timeZone: "UTC" }),
+            label: date.toLocaleDateString(undefined, { day: "numeric", month: "short", timeZone: "UTC" }),
             seconds: byDay.get(day) || 0,
             minutes: Math.round((byDay.get(day) || 0) / 60),
           };
@@ -3319,6 +3425,8 @@ function FlowUsage({ user, onTargets, hiddenSites = [], onToggleHidden }) {
         const appTargets = [...appByName.values()].sort((a, b) => b.seconds - a.seconds)
           .map((e) => ({ kind: "app", target: e.domain, domain: e.domain, seconds: e.seconds }));
         setD({
+          hourly,
+          historyUnavailable: Boolean(response.error),
           installed: Boolean(extension.installed),
           todaySeconds: todaySecs,
           totalSeconds: websiteRangeTargets.reduce((sum, item) => sum + item.seconds, 0),
@@ -3328,6 +3436,7 @@ function FlowUsage({ user, onTargets, hiddenSites = [], onToggleHidden }) {
           rangeFrom: from,
           rangeTo: to,
           rangeDays: selectedDays,
+          trackedDays: new Set([...websitesByDate.keys(), ...appsByDate.keys()].filter((day) => day >= from && day <= to && ((byDay.get(day) || 0) + (appByDay.get(day) || 0)) > 0)).size,
           daily,
           desktopTodaySeconds: appByDay.get(today) || 0,
           desktopTotalSeconds: appRangeTargets.reduce((sum, item) => sum + item.seconds, 0),
@@ -3340,30 +3449,35 @@ function FlowUsage({ user, onTargets, hiddenSites = [], onToggleHidden }) {
           blockedToday: extension.installed ? extension.blockedToday || [] : [],
           limits: extension.installed ? extension.usageLimits || [] : [],
         });
-        onTargets?.([...websiteTargets, ...appTargets]);
+        const observed = new Map(rows.filter((row) => row.kind !== "app" || !isSystemApp(row.name))
+          .map((row) => [`${row.kind}:${row.name}`, { kind: row.kind, target: row.name, seconds: row.seconds }]));
+        onTargets?.([...observed.values()]);
       } catch {
         if (!dead) setD({ installed: false, todayMinutes: 0, totalMinutes: 0, days: 0, daily: [], top: [], desktopTodayMinutes: 0, desktopTotalMinutes: 0, desktopDaily: [], desktopTop: [], blockedToday: [], limits: [] });
       }
     };
     refresh();
     const onVisible = () => { if (document.visibilityState === "visible") refresh(); };
+    const onSync = () => refresh();
     window.addEventListener("pageshow", onVisible);
     document.addEventListener("visibilitychange", onVisible);
-    const timer = setInterval(onVisible, 60000);
+    window.addEventListener("north:sync", onSync);
+    const timer = setInterval(onVisible, 30000);
     return () => {
       dead = true;
       clearInterval(timer);
       window.removeEventListener("pageshow", onVisible);
       document.removeEventListener("visibilitychange", onVisible);
+      window.removeEventListener("north:sync", onSync);
     };
-  }, [user.un, hiddenSites, rangeFrom, rangeTo, onTargets]);
+  }, [user.id, user.un, user.authLinked, hiddenSites, rangeFrom, rangeTo, onTargets]);
 
-  if (!d) return null;
-  const blockedAttempts = d.blockedToday.reduce((n, e) => n + (Number(e.count) || 0), 0);
-  const isWeb = source === "website";
-  const daily = isWeb ? d.daily || [] : d.desktopDaily || [];
-  const todaySeconds = isWeb ? d.todaySeconds : d.desktopTodaySeconds;
-  const totalSeconds = isWeb ? d.totalSeconds : d.desktopTotalSeconds;
+  const d = usageData || { daily: [], top: [], desktopTop: [], desktopDaily: [], rangeDays: 1 };
+  const daily = customRange
+    ? (d.daily || []).map((day, index) => ({ ...day, seconds: day.seconds + (d.desktopDaily?.[index]?.seconds || 0) }))
+    : Array.from({ length: 24 }, (_, hour) => ({ day: `${rangeFrom}:${hour}`, label: `${hour}:00`, seconds: d.hourly?.[hour] || 0 }));
+  const todaySeconds = (d.todaySeconds || 0) + (d.desktopTodaySeconds || 0);
+  const totalSeconds = (d.totalSeconds || 0) + (d.desktopTotalSeconds || 0);
   const averageSeconds = Math.round(totalSeconds / Math.max(1, d.rangeDays || 1));
   const chartTotalSeconds = daily.reduce((sum, item) => sum + item.seconds, 0);
   const chartPoints = daily.map((day, index) => ({
@@ -3378,7 +3492,7 @@ function FlowUsage({ user, onTargets, hiddenSites = [], onToggleHidden }) {
   ].sort((a, b) => b.seconds - a.seconds);
   const palette = [K.acc, "#64748b", "#0f766e", "#94a3b8", "#475569", "#cbd5e1"];
   const pie = (title, entries, empty) => {
-    const shown = entries.slice(0, 6);
+    const shown = entries.length <= 6 ? entries : [...entries.slice(0, 5), { domain: "Other", seconds: entries.slice(5).reduce((sum, item) => sum + item.seconds, 0) }];
     const total = shown.reduce((sum, item) => sum + item.seconds, 0);
     let offset = 0;
     const slices = shown.map((item, index) => {
@@ -3389,77 +3503,59 @@ function FlowUsage({ user, onTargets, hiddenSites = [], onToggleHidden }) {
     return <section className="flow-pie-panel" aria-label={title}>
       <div className="flow-pie-title">{title}</div>
       {shown.length ? <div className="flow-pie-content">
-        <div className="flow-pie" role="img" aria-label={`${title}: ${shown.map((item) => `${item.domain}, ${Math.round(item.seconds / total * 100)} percent`).join("; ")}`} style={{ background: `conic-gradient(${slices.join(", ")})` }}><span>{fmt(total)}</span></div>
+        <svg className="flow-pie" viewBox="0 0 200 200" role="img" aria-label={`${title}: ${shown.map((item) => `${item.domain}, ${Math.round(item.seconds / total * 100)} percent`).join("; ")}`}>
+          {shown.map((item, index) => {
+            const start = shown.slice(0, index).reduce((sum, entry) => sum + entry.seconds / total * Math.PI * 2, -Math.PI / 2);
+            const angle = item.seconds / total * Math.PI * 2;
+            const end = start + angle;
+            const color = palette[index % palette.length];
+            return <g key={item.domain}>
+              {shown.length === 1 ? <circle cx="100" cy="100" r="96" fill={color} /> : <path d={`M100,100 L${100 + 96 * Math.cos(start)},${100 + 96 * Math.sin(start)} A96,96 0 ${angle > Math.PI ? 1 : 0},1 ${100 + 96 * Math.cos(end)},${100 + 96 * Math.sin(end)} Z`} fill={color} stroke={K.bg} strokeWidth="1.5" />}
+              <title>{item.domain}: {fmt(item.seconds)} ({Math.round(item.seconds / total * 100)}%)</title>
+            </g>;
+          })}
+        </svg>
         <div className="flow-pie-legend">{shown.map((item, index) => <div key={item.domain} title={item.domain}><i style={{ background: palette[index % palette.length] }} /><span>{item.domain}</span><small>{Math.round(item.seconds / total * 100)}%</small></div>)}</div>
-      </div> : <p className="flow-empty">{empty}</p>}
+      </div> : <p className="flow-empty">{usageData ? empty : "Loading activity…"}</p>}
     </section>;
   };
   const fmt = formatFlowDuration;
   return (
     <div className="flow-analytics">
       <div className="flow-analytics-header">
-        <div><h3>{isWeb ? "Website usage" : "Desktop app usage"}</h3><p>{isWeb ? "Browser activity collected by NORTH Flow extension" : "Foreground app activity from NORTH Desktop"}</p></div>
-        {[ ["website", "Web"], ["desktop", "Desktop"] ].map(([id, label]) => (
-          <button key={id} type="button" className="b" aria-pressed={source === id} onClick={() => setSource(id)}
-            style={{ padding: "7px 13px", fontSize: 11, borderRadius: 20, color: source === id ? K.txt : K.sub, background: source === id ? `${K.acc}30` : "transparent", border: `1px solid ${source === id ? K.acc + "88" : K.border}` }}>{label}</button>
-        ))}
+        <div><h3>Activity overview</h3><p>Your websites and apps, together.</p></div>
       </div>
+      {d.historyUnavailable && <div role="status" style={{ color: K.sub, fontSize: 12 }}>Account history is temporarily unavailable. Showing activity available on this device.</div>}
       <div style={{ display: "flex", alignItems: "end", gap: 8, flexWrap: "wrap", marginBottom: 12 }}>
-        <label style={{ color: K.sub, fontSize: 10 }}>From<input type="date" value={rangeFrom} max={currentDay} onChange={(event) => setRangeFrom(event.target.value || currentDay)} style={{ ...inpSt(), display: "block", width: 150, marginTop: 4, padding: "7px 9px" }} /></label>
-        <label style={{ color: K.sub, fontSize: 10 }}>To<input type="date" value={rangeTo} max={currentDay} onChange={(event) => setRangeTo(event.target.value || currentDay)} style={{ ...inpSt(), display: "block", width: 150, marginTop: 4, padding: "7px 9px" }} /></label>
-        <button type="button" className="b" onClick={() => { setRangeFrom(currentDay); setRangeTo(currentDay); }} style={{ ...tag(rangeFrom === currentDay && rangeTo === currentDay, K.acc), padding: "8px 12px" }}>Today</button>
-        <button type="button" className="b" onClick={() => { const date = new Date(`${currentDay}T00:00:00Z`); date.setUTCDate(date.getUTCDate() - 1); const day = date.toISOString().slice(0, 10); setRangeFrom(day); setRangeTo(day); }} style={{ ...tag(false, K.acc), padding: "8px 12px" }}>Yesterday</button>
-        <span style={{ color: K.sub, fontSize: 11 }}>{d.rangeFrom === d.rangeTo ? d.rangeFrom : `${d.rangeFrom} → ${d.rangeTo}`} · {fmt(totalSeconds)}</span>
+        <DateField label="From" value={rangeFrom} max={currentDay} onChange={(day) => { setCustomRange(true); setRangeFrom(day); if (day > rangeTo) setRangeTo(day); }} colors={K} />
+        <DateField label="To" value={rangeTo} max={currentDay} onChange={(day) => { setCustomRange(true); setRangeTo(day); if (day < rangeFrom) setRangeFrom(day); }} colors={K} />
+        <button type="button" className="b" onClick={() => { setCustomRange(false); setRangeFrom(currentDay); setRangeTo(currentDay); }} aria-pressed={!customRange && rangeFrom === currentDay} style={{ ...tag(!customRange && rangeFrom === currentDay && rangeTo === currentDay, K.acc), padding: "8px 12px" }}>Today</button>
+        <button type="button" className="b" onClick={() => { setCustomRange(false); setRangeFrom(yesterdayDay); setRangeTo(yesterdayDay); }} aria-pressed={!customRange && rangeFrom === yesterdayDay} style={{ ...tag(!customRange && rangeFrom === yesterdayDay && rangeTo === yesterdayDay, K.acc), padding: "8px 12px" }}>Yesterday</button>
       </div>
       <div className="flow-analytics-top">
         <section className="flow-time-chart">
-          <div className="flow-chart-title"><strong>Usage time</strong><span>{fmt(chartTotalSeconds)} · last 7 days</span></div>
-          <svg viewBox="0 0 640 230" role="img" aria-label={`Daily ${isWeb ? "website" : "desktop app"} usage, last seven days: ${daily.map((item) => `${item.label} ${fmt(item.seconds)}`).join(", ")}`}>
+          <div className="flow-chart-title"><strong>{customRange ? "Daily activity" : "Hourly activity"}</strong><span>{usageData ? `${fmt(chartTotalSeconds)} · ${customRange ? "selected dates" : "UTC"}` : "Loading activity…"}</span></div>
+          {!customRange && !chartTotalSeconds && totalSeconds > 0 && <p className="flow-empty">Hourly detail is recorded from this update onward. Earlier daily totals remain below.</p>}
+          <svg viewBox="0 0 640 230" role="img" aria-label={`${customRange ? "Daily" : "Hourly"} usage: ${daily.map((item) => `${item.label} ${fmt(item.seconds)}`).join(", ")}`}>
             {[0, 1, 2, 3].map((line) => <line key={line} x1="42" x2="602" y1={178 - line * 48} y2={178 - line * 48} stroke={K.border} strokeWidth="1" />)}
             <path d={chartPath} fill="none" stroke={K.acc} strokeWidth="4" strokeLinecap="round" strokeLinejoin="round" />
-            {chartPoints.map((point) => <g key={point.day}><circle cx={point.x} cy={point.y} r="5" fill={K.acc} /><text x={point.x} y="210" textAnchor="middle" fill={K.sub} fontSize="12">{point.label}</text><title>{point.day}: {fmt(point.seconds)}</title></g>)}
+            {chartPoints.map((point, index) => <g key={point.day}><circle cx={point.x} cy={point.y} r="3" fill={K.acc} />{(index % Math.max(1, Math.ceil(daily.length / 8)) === 0 || index === daily.length - 1) && <text x={point.x} y="210" textAnchor="middle" fill={K.sub} fontSize="12">{point.label}</text>}<title>{point.label}: {fmt(point.seconds)}</title></g>)}
           </svg>
-          <p className="flow-chart-note">Daily totals · exact hourly sessions are not currently collected.</p>
         </section>
         <div className="flow-stat-grid">
-          {[["TODAY", fmt(todaySeconds)], ["AVERAGE DAILY", fmt(averageSeconds)], ["SELECTED TOTAL", fmt(totalSeconds)], ["DAYS WITH USAGE", isWeb ? d.days : d.desktopDays || 0]].map(([label, value]) => <div className="flow-stat" key={label}><span>{label}</span><strong>{value}</strong></div>)}
+          {[["TODAY", new Date(`${currentDay}T12:00:00Z`).toLocaleDateString(undefined, { day: "numeric", month: "short", timeZone: "UTC" })], ["CURRENT DAY", fmt(todaySeconds)], ["AVERAGE DAILY", fmt(averageSeconds)], ["DAYS TRACKED", d.trackedDays || 0]].map(([label, value]) => <div className="flow-stat" key={label}><span>{label}</span><strong>{usageData || label === "TODAY" ? value : "—"}</strong></div>)}
         </div>
       </div>
       <div className="flow-analytics-lower">
         <section className="flow-device-list">
-          <h4>All devices & websites</h4>
-          {allTargets.length ? allTargets.map((item) => <div className="flow-target-row" key={`${item.kind}-${item.domain}`}><div><strong>{item.domain}</strong><small>{item.kind}</small></div><span>{fmt(item.seconds)}</span>{item.kind === "Website" && <button type="button" className="b" onClick={() => onToggleHidden?.(item.domain)} aria-label={`Hide ${item.domain} from usage reports`} title="Hide from usage reports" style={{ color: K.sub, padding: 5 }}><EyeOff size={14} /></button>}</div>) : <div className="flow-empty">{isWeb ? "No browser usage recorded yet." : "No usage recorded yet. Run North Desktop and the browser extension to collect activity."}</div>}
-          {isWeb && <div style={{ marginTop: 18, paddingTop: 14, borderTop: `1px solid ${K.border}` }}>
-            <h4 style={{ margin: "0 0 4px", color: K.txt, fontSize: 13 }}>Hidden websites</h4>
-            <p style={{ margin: "0 0 9px", color: K.sub, fontSize: 10.5 }}>Excluded from website totals and charts; this preference syncs with your North account.</p>
-            <form onSubmit={(event) => { event.preventDefault(); const host = normalizeHost(hiddenDraft); if (host) { onToggleHidden?.(host); setHiddenDraft(""); } }} style={{ display: "flex", gap: 7 }}>
-              <input aria-label="Website to hide from usage" value={hiddenDraft} onChange={(event) => setHiddenDraft(event.target.value)} placeholder="youtube.com" style={{ ...inpSt(), flex: 1, minWidth: 0, padding: "8px 10px", fontSize: 11 }} />
-              <button type="submit" className="b" disabled={!normalizeHost(hiddenDraft)} style={{ padding: "7px 12px", borderRadius: 9, background: K.acc, color: K.onAcc, fontSize: 11, fontWeight: 600 }}>Hide</button>
-            </form>
-            {hiddenSites.length ? hiddenSites.map((host) => <div className="flow-target-row" key={host}><div><strong>{host}</strong><small>Excluded from usage reports</small></div><button type="button" className="b" onClick={() => onToggleHidden?.(host)} aria-label={`Unhide ${host}`} style={{ color: K.acc, padding: 5 }}><Eye size={14} /> Show</button></div>) : <div className="flow-empty" style={{ padding: "9px 0 0" }}>No hidden websites.</div>}
-          </div>}
+          <h4>Websites & apps</h4>
+          {allTargets.length ? allTargets.map((item) => <div className="flow-target-row" key={`${item.kind}-${item.domain}`}><div><strong>{item.domain}</strong><small>{item.kind}</small></div><span>{fmt(item.seconds)}</span>{item.kind === "Website" && <button type="button" className="b" onClick={() => onToggleHidden?.(item.domain)} aria-label={`Hide ${item.domain} from usage reports`} title="Hide from usage reports" style={{ color: K.sub, padding: 5 }}><EyeOff size={14} /></button>}</div>) : <div className="flow-empty">No activity recorded for these dates.</div>}
         </section>
         <div className="flow-pie-grid">
           {pie("Desktop app usage", d.desktopTop || [], "No desktop app data yet. North Desktop collects this.")}
           {pie("Website usage", d.top || [], "No website data yet. North Flow extension collects this.")}
         </div>
       </div>
-      {isWeb && d.limits?.length > 0 && <div style={{ marginTop: 10 }}>
-        <div style={{ fontSize: 10, color: K.sub, marginBottom: 3 }}>DAILY LIMITS · THIS BROWSER</div>
-        {d.limits.map((limit) => (
-          <div key={limit.target} style={{ display: "flex", justifyContent: "space-between", gap: 8, padding: "4px 0", fontSize: 11 }}>
-            <span style={{ color: K.txt }}>{limit.target}</span>
-            <span style={{ color: limit.reached ? K.err : K.sub }}>{fmt(limit.usedSeconds)} / {fmt(limit.dailyLimitMinutes * 60)}{limit.reached ? " · blocked" : ""}</span>
-          </div>
-        ))}
-      </div>}
-      <div style={{ fontSize: 10, color: K.sub, marginTop: 8 }}>{d.installed ? "Browser stats are local to this browser; completed-day totals sync to your North account." : "Browser extension not detected in this browser."} Desktop totals come from NORTH Desktop.</div>
-      {isWeb && blockedAttempts > 0 && (
-        <div style={{ marginTop: 7, paddingTop: 7, borderTop: `1px solid ${K.border}`, fontSize: 11.5, color: K.txt }}>
-          {blockedAttempts} blocked attempt{blockedAttempts === 1 ? "" : "s"} today
-          {d.blockedToday.slice(0, 3).map((e) => <span key={e.host} style={{ color: K.sub }}> · {e.host} ({e.count})</span>)}
-        </div>
-      )}
     </div>
   );
 }
@@ -3615,7 +3711,14 @@ function Blocking({ user }) {
   const [createEnd, setCreateEnd] = useState("17:00");
   const [createSearch, setCreateSearch] = useState("");
   const [createError, setCreateError] = useState("");
-  const [limitSyncNote, setLimitSyncNote] = useState("");
+  const [limitSyncNote, setLimitSyncNote] = useState(() => {
+    try {
+      const key = `north:refresh:${user.un}`;
+      const result = JSON.parse(sessionStorage.getItem(key) || 'null');
+      return result && Date.now() - result.at < 30000 ? result.note : '';
+    } catch { return ''; }
+  });
+  const [refreshing, setRefreshing] = useState(false);
   const [, bumpClock] = useState(0); // the verdict depends on the wall clock
   const [showSite, setShowSite] = useState(false);
   const [site, setSite] = useState("");
@@ -3638,6 +3741,9 @@ function Blocking({ user }) {
     setHiddenUsageSites(Array.isArray(user.hiddenUsageSites) ? user.hiddenUsageSites : []);
   }, [user.un, user.hiddenUsageSites]);
   useEffect(() => {
+    setBlocking(normalizeState(user.blocking || defaultBlocking()));
+  }, [user.un, user.blocking]);
+  useEffect(() => {
     const site = normalizeHost(new URLSearchParams(window.location.search).get("site") || "");
     if (site) {
       setSelectedTargets([{ kind: "website", target: site, seconds: 0 }]);
@@ -3654,7 +3760,13 @@ function Blocking({ user }) {
     setBlocking(next);
     setLimitSyncNote("Saving to your account…");
     const u = (await S.get(PROFILE_KEY(user.un))) || {};
-    await S.set(PROFILE_KEY(user.un), { ...u, blocking: next });
+    try {
+      await S.set(PROFILE_KEY(user.un), { ...u, blocking: next });
+    } catch {
+      setLimitSyncNote("Could not save this limit. Device storage is unavailable or full.");
+      return false;
+    }
+    await applyDesktopBlocking(next).catch(() => {});
     // Push first, then tell the extension to pull. The opposite order races
     // and lets the extension fetch the previous profile revision.
     const pushed = SYNC.ready()
@@ -3669,6 +3781,7 @@ function Blocking({ user }) {
       notifyExtension("north-sync");
       setLimitSyncNote(SYNC.ready() ? "Saved here · account sync will retry automatically" : "Saved on this device");
     }
+    return true;
   };
   const toggleHiddenUsageSite = async (input) => {
     const host = normalizeHost(input);
@@ -3680,6 +3793,7 @@ function Blocking({ user }) {
     const profileKey = PROFILE_KEY(user.un);
     const profile = (await S.get(profileKey)) || {};
     await S.set(profileKey, { ...profile, hiddenUsageSites: next });
+    if (SYNC.ready()) await SYNC.flushProfile(user.un).catch(() => {});
   };
   // Rules are always created "always"-on; the focus window and schedules
   // shape when they run, so the old per-rule Always/Focus/Scheduled picker
@@ -3718,7 +3832,6 @@ function Blocking({ user }) {
 
   const createLimit = async () => {
     if (!selectedTargets.length) { setCreateError("Select at least one website or desktop app."); return; }
-    if (createMode === "session" && hasDesktopTarget) { setCreateError("Variable session limits currently work for websites only."); return; }
     if (["daily", "session"].includes(createMode) && (!Number.isInteger(totalLimitMinutes) || totalLimitMinutes < 1 || totalLimitMinutes > (createMode === "session" ? 240 : 1440))) {
       setCreateError(createMode === "session" ? "Choose a session allowance from 1 to 240 minutes." : "Choose a daily limit from 1 minute to 24 hours."); return;
     }
@@ -3727,10 +3840,9 @@ function Blocking({ user }) {
     }
     const eligible = selectedTargets.filter((chosen) => {
       const target = chosen.kind === "app" ? normalizeApp(chosen.target) : normalizeHost(chosen.target);
-      return !blocking.rules.some((rule) => rule.kind === chosen.kind && rule.target.toLowerCase() === target.toLowerCase())
-        && !blocking.usageLimits.some((limit) => limit.kind === chosen.kind && limit.target.toLowerCase() === target.toLowerCase());
+      return Boolean(target);
     });
-    if (!eligible.length) { setCreateError("Those targets already have a limit or blocking rule."); return; }
+    if (!eligible.length) { setCreateError("Choose a valid website or application."); return; }
     let next = blocking;
     let schedule = null;
     if (createMode === "scheduled") {
@@ -3739,9 +3851,10 @@ function Blocking({ user }) {
     }
     for (const chosen of eligible) {
       const target = chosen.kind === "app" ? normalizeApp(chosen.target) : normalizeHost(chosen.target);
-      const duplicateRule = next.rules.some((rule) => rule.kind === chosen.kind && rule.target.toLowerCase() === target.toLowerCase());
-      const duplicateLimit = next.usageLimits.some((limit) => limit.kind === chosen.kind && limit.target.toLowerCase() === target.toLowerCase());
-      if (duplicateRule || duplicateLimit) continue;
+      next = { ...next,
+        rules: next.rules.filter((rule) => !(rule.kind === chosen.kind && rule.target.toLowerCase() === target.toLowerCase())),
+        usageLimits: next.usageLimits.filter((limit) => !(limit.kind === chosen.kind && limit.target.toLowerCase() === target.toLowerCase())),
+      };
       if (createMode === "permanent" || createMode === "scheduled") {
         next = upsertRule(next, newRule({
           kind: chosen.kind, target, when: createMode === "scheduled" ? "scheduled" : "always",
@@ -3753,7 +3866,7 @@ function Blocking({ user }) {
         });
       }
     }
-    await persist(next);
+    if (!await persist(next)) return;
     setShowLimitCreate(false); setSelectedTargets([]); setCreateName(""); setCreateError("");
   };
 
@@ -3822,7 +3935,29 @@ function Blocking({ user }) {
   return (
     <>
     <div className="npage">
-      <h2 style={{ ...pageTitle(), margin: "0 0 16px" }}>North Flow</h2>
+      <div className="flow-heading" style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12, flexWrap: "wrap", marginBottom: 16 }}>
+        <h2 style={{ ...pageTitle(), margin: 0 }}>North Flow</h2>
+        <button type="button" className="b" disabled={refreshing} aria-busy={refreshing} style={{ ...tag(false, K.acc), padding: "10px 14px", color: K.txt }} onClick={async () => {
+          setRefreshing(true); setLimitSyncNote("Refreshing account, usage and blocking…");
+          try {
+            if (!SYNC.ready()) throw new Error("Sign in to North to refresh account sync.");
+            const saved = await SYNC.flush("manual refresh");
+            if (!saved.ok) throw new Error("Pending changes are saved locally. Check your connection and retry.");
+            if (!await SYNC.pull(user.un)) throw new Error("Account refresh did not complete. Your local changes are preserved.");
+            const profile = await S.get(PROFILE_KEY(user.un));
+            if (profile) { setBlocking(normalizeState(profile.blocking)); await applyDesktopBlocking(profile.blocking); }
+            await refreshDesktopSync();
+            const extension = await requestExtensionSync(15000).catch(() => null);
+            window.dispatchEvent(new Event("north:refresh-sync"));
+            window.dispatchEvent(new Event("north:sync"));
+            const note = extension?.synced ? `Account and extension refreshed · ${new Date().toLocaleTimeString()}` : "Account refreshed. Extension connection was not confirmed; check its sync status.";
+            sessionStorage.setItem(`north:refresh:${user.un}`, JSON.stringify({ note, at: Date.now() }));
+            window.location.reload();
+          } catch (error) { setLimitSyncNote(error.message || "Refresh failed. Please retry."); }
+          finally { setRefreshing(false); }
+        }}>{refreshing ? "Refreshing…" : "↻ Refresh sync"}</button>
+      </div>
+      {limitSyncNote && <p role="status" aria-live="polite" style={{ color: K.sub, fontSize: 12, lineHeight: 1.5 }}>{limitSyncNote}</p>}
 
       {/* ── Usage: real time the extension recorded, not a manual log. ── */}
       <FlowUsage user={user} onTargets={setObservedTargets} hiddenSites={hiddenUsageSites} onToggleHidden={toggleHiddenUsageSite} />
@@ -3830,8 +3965,8 @@ function Blocking({ user }) {
       <section style={{ ...card(), marginBottom: 14 }} aria-labelledby="flow-limits-heading">
         <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 10 }}>
           <div style={{ flex: 1 }}><div id="flow-limits-heading" style={sectionTitle()}>Usage limits</div>
-            <div style={{ fontSize: 11, color: K.sub, marginTop: 3 }}>Websites are enforced by the extension · desktop apps by North Desktop</div>
-            {limitSyncNote && <div role="status" style={{ fontSize: 10.5, color: K.acc, marginTop: 4 }}>{limitSyncNote}</div>}</div>
+            <div style={{ color: K.sub, fontSize: 11, marginTop: 4 }}>One account-wide list for websites and desktop apps.</div>
+          </div>
           <button type="button" className="b" onClick={() => { setCreateError(""); setShowLimitCreate(true); }} style={{ padding: "9px 13px", borderRadius: 10, background: K.acc, color: K.onAcc, fontSize: 12, fontWeight: 650, whiteSpace: "nowrap" }}>＋ Create new limit</button>
         </div>
         {blocking.usageLimits.length + blocking.rules.length === 0
@@ -3841,7 +3976,7 @@ function Blocking({ user }) {
             const detail = type === "limit" ? (item.mode === "session" ? `${item.dailyLimitMinutes} min per visit` : `${item.dailyLimitMinutes} min per day`) : item.when === "scheduled" ? `Scheduled · ${item.scheduleIds.map((id) => blocking.schedules.find((schedule) => schedule.id === id)?.name).filter(Boolean).join(", ")}` : item.when === "focus" ? "Blocked during focus" : "Blocked permanently";
             return <div key={`${type}:${item.id}`} style={{ display: "flex", alignItems: "center", gap: 10, borderTop: `1px solid ${K.border}`, padding: "10px 2px" }}>
               <span aria-hidden="true">{isApp ? "▣" : "◉"}</span><div style={{ flex: 1, minWidth: 0 }}><div style={{ color: K.txt, fontSize: 12.5, fontWeight: 600, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{item.label || item.name || item.target}</div>
-                <div style={{ color: K.sub, fontSize: 10.5, marginTop: 2 }}>{item.target} · {detail} · {isApp ? "North Desktop" : "Extension"}</div></div>
+                <div style={{ color: K.sub, fontSize: 12, marginTop: 3 }}>{item.target} · {detail}</div></div>
               <button type="button" className="b" aria-label={`Remove limit for ${item.target}`} onClick={() => persist(type === "limit" ? removeUsageLimit(blocking, item.id) : removeRule(blocking, item.id))} style={{ padding: 6, color: K.muted }}><Trash2 size={14} /></button>
             </div>;
           })}
@@ -4125,22 +4260,21 @@ function Blocking({ user }) {
           <div style={{ maxHeight: 205, overflowY: "auto", border: `1px solid ${K.border}`, borderRadius: 12, padding: "4px 10px" }}>
             {availableTargets.length ? availableTargets.map((target) => {
               const selected = selectedTargets.some((item) => item.kind === target.kind && item.target === target.target);
-              const disabled = createMode === "session" && target.kind === "app";
+              const disabled = false;
               return <label key={`${target.kind}:${target.target}`} style={{ display: "flex", alignItems: "center", gap: 9, padding: "8px 0", borderBottom: `1px solid ${K.border}`, opacity: disabled ? .45 : 1, cursor: disabled ? "not-allowed" : "pointer" }}>
                 <input type="checkbox" checked={selected} disabled={disabled} onChange={() => {
                   setSelectedTargets((items) => selected ? items.filter((item) => !(item.kind === target.kind && item.target === target.target)) : [...items, target]);
-                  if (target.kind === "app" && !selected && createMode === "session") setCreateMode("daily");
                 }} />
                 <span style={{ flex: 1, color: K.txt, fontSize: 12 }}>{target.kind === "app" ? "▣" : "◉"} {target.target}</span>
                 <span style={{ color: K.sub, fontSize: 10.5 }}>{target.seconds ? formatFlowDuration(target.seconds) : "Seen"}</span>
               </label>;
             }) : <div style={{ padding: 14, color: K.sub, fontSize: 11.5 }}>No recorded activity yet. Visit a site or use an app, then come back here.</div>}
           </div>
-          <div style={{ color: K.sub, fontSize: 10.5, margin: "6px 0 16px" }}>Selected {selectedTargets.length} · website limits run in the extension; app limits run in North Desktop.</div>
+          <div style={{ color: K.sub, fontSize: 10.5, margin: "6px 0 16px" }}>Selected {selectedTargets.length} · connected North clients enforce the targets they can control.</div>
           <label style={{ display: "block", color: K.txt, fontSize: 12, fontWeight: 600, marginBottom: 8 }}>2 · Choose a limit type</label>
           <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(210px,1fr))", gap: 7 }}>
-            {[["permanent", "Block permanently", "Keep the target blocked until you remove the limit."], ["scheduled", "Block on a schedule", "Block during selected days and hours."], ["daily", "Set a daily usage limit", "Block once today’s allowance is used."], ["session", "Variable session limit", "Choose an allowance for each visit. Websites only."]].map(([value, title, hint]) => (
-              <button key={value} type="button" role="radio" aria-checked={createMode === value} onClick={() => { setCreateMode(value); if (value === "session" && hasDesktopTarget) setSelectedTargets((items) => items.filter((item) => item.kind === "website")); }}
+            {[["permanent", "Block permanently", "Keep blocked until you remove this limit."], ["scheduled", "Block on a schedule", "Block during selected days and hours."], ["daily", "Daily usage limit", "Block once today’s allowance is used."], ["session", "Session limit", "Browser visits ask for an allowance. Apps use the allowance below until closed."]].map(([value, title, hint]) => (
+              <button key={value} type="button" role="radio" aria-checked={createMode === value} onClick={() => setCreateMode(value)}
                 style={{ textAlign: "left", border: `1px solid ${createMode === value ? K.acc : K.border}`, borderRadius: 12, padding: 10, background: createMode === value ? K.accDim : K.surf, color: K.txt, cursor: "pointer" }}>
                 <div style={{ fontSize: 12, fontWeight: 650 }}>{createMode === value ? "◉ " : "○ "}{title}</div><div style={{ color: K.sub, fontSize: 10.5, lineHeight: 1.4, marginTop: 4 }}>{hint}</div>
               </button>))}
@@ -4170,6 +4304,7 @@ function Blocking({ user }) {
 const MEDALS = ["🥇", "🥈", "🥉"];
 
 function Social({ user }) {
+  const accountReady = Boolean(SYNC?.ready());
   const [tab,     setTab]     = useState("board");
   const [board,   setBoard]   = useState([]);
   const [friends, setFriends] = useState(user.friends || []);
@@ -4228,12 +4363,13 @@ function Social({ user }) {
         SYNC.leaderboard(),
         SYNC.pull().catch(() => {}).then(() => S.get(`u:${user.un}`)).then((u) => u?.friends) || user.friends || [],
         // Incoming pending requests: rows pointing at my username.
-        supabase.from("friends").select("user_id, friend_un, created_at")
-          .eq("friend_un", user.un).eq("status", "pending"),
+        supabase.rpc("friend_requests"),
         SYNC.friendFeed(),
       ]), 12000);
       if (Array.isArray(mine)) setFriends(mine);
-      setIncoming((inc?.data || []).map((r) => ({ un: r.user_id, at: r.created_at })));
+      if (inc?.error) throw inc.error;
+      setIncoming((inc?.data || []).filter((r) => r.direction === "incoming").map((r) => ({ un: r.un, at: r.created_at })));
+      setPendingOut((inc?.data || []).filter((r) => r.direction === "outgoing").map((r) => r.un));
       setFeed(fd || []);
       const live = await localBoard();
       if (live.length) setBoard(live);
@@ -4252,9 +4388,9 @@ function Social({ user }) {
   // The staged loader intentionally reruns only when the account changes;
   // button actions invoke it directly after their own state transition.
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  useEffect(() => { loadSocial(); }, [user.un]);
+  useEffect(() => { loadSocial(); }, [user.un, user.authLinked, accountReady]);
 
-  const myRank = board.findIndex((e) => e.un === user.un) + 1;
+  const myRank = board.find((e) => e.un === user.un)?.rank || board.findIndex((e) => e.un === user.un) + 1;
   const myData = board.find((e) => e.un === user.un);
   const feedFor = (un) => feed.find((f) => f.un === un);
   const fBoard = board.filter((e) => friends.includes(e.un));
@@ -4273,7 +4409,7 @@ function Social({ user }) {
       loadSocial();
     } catch (e) {
       setFerr(/relation .* does not exist|schema cache/i.test(e?.message || "")
-        ? "Social requests need migration 003 applied (see SETUP.md)."
+        ? "Friend requests need the secure social database update applied in Supabase."
         : e?.message || String(e));
     }
   };
@@ -4290,7 +4426,7 @@ function Social({ user }) {
       loadSocial();
     } catch (e) {
       setFerr(/schema cache/i.test(e?.message || "")
-        ? "Social requests need migration 003 applied (see SETUP.md)."
+        ? "Friend requests need the secure social database update applied in Supabase."
         : e?.message || String(e));
     }
   };
@@ -4342,7 +4478,7 @@ function Social({ user }) {
       <h2 style={{ ...pageTitle(), margin: "0 0 16px" }}>Social</h2>
 
       {/* My rank card — only shown when there are actually other users */}
-      {others.length > 0 && myData && (
+      {myData && (
         <div style={{
           ...card(), marginBottom: 20,
           background: K.accDim,
@@ -4373,7 +4509,7 @@ function Social({ user }) {
         {/* The metric is named on the tab: rankings come from the server's
             aggregate of recorded focus minutes (`daily_focus`, written by the
             database from sessions — a client cannot inflate it). */}
-        {[["board", "Leaderboard · focus time"], ["friends", "Friends"]].map(([id, lbl]) => (
+        {[["board", "Global · focus time"], ["friends", "Friends"]].map(([id, lbl]) => (
           <button key={id} type="button" role="tab" aria-selected={tab === id} className="b"
             onClick={() => setTab(id)}
             style={{
@@ -4421,7 +4557,7 @@ function Social({ user }) {
                 : "You're the first one here. Rankings are live and server-computed — they fill up as more people join NORTH on any client."}
             </div>
           </div>
-        ) : board.slice(0, 25).map((e, i) => <Row key={e.un} e={e} rank={i + 1} />)
+        ) : board.slice(0, 25).map((e, i) => <Row key={e.un} e={e} rank={e.rank || i + 1} />)
       ) : (
         <div>
           <div style={{ display: "flex", gap: 7, marginBottom: 8 }}>
@@ -4632,6 +4768,13 @@ function SpotifyFloatingPlayer() {
   const [draft, setDraft] = useState(() => { try { return localStorage.getItem(SPOTIFY_EMBED_KEY) || DEFAULT_SPOTIFY_PLAYLIST; } catch { return DEFAULT_SPOTIFY_PLAYLIST; } });
   const [error, setError] = useState("");
   useEffect(() => {
+    const narrow = window.matchMedia("(max-width: 820px)");
+    const adapt = () => { if (narrow.matches) setMinimized(true); };
+    adapt();
+    narrow.addEventListener("change", adapt);
+    return () => narrow.removeEventListener("change", adapt);
+  }, []);
+  useEffect(() => {
     const update = (event) => setUrl(event.detail || "");
     window.addEventListener("north:spotify-embed", update);
     return () => window.removeEventListener("north:spotify-embed", update);
@@ -4677,16 +4820,19 @@ function SpotifyFloatingPlayer() {
 function FocusPreferences({ user, onUpdate }) {
   // Timer durations — the ONE place they are editable. Same pomodoro profile
   // (`u:<un>.pm`) the Focus timer reads, same clamp/step constants, so the
-  // dial changes the moment the next phase begins. No sound/notify controls:
-  // end-of-session behavior is not a customization surface.
+  // Sound preferences share the same profile on web and desktop.
   const [pm, setPm] = useState({ w: 25, sb: 5, lb: 15, ...(user.pm || {}) });
+  useEffect(() => { setPm((current) => ({ ...current, ...(user.pm || {}) })); }, [user.pm]);
+  const update = (changes) => {
+    const next = { ...pm, ...changes };
+    setPm(next);
+    onUpdate(next);
+    S.get(`u:${user.un}`).then((u) => S.set(`u:${user.un}`, { ...(u || {}), pm: { ...(u?.pm || {}), ...changes } }));
+  };
   const bumpDur = (k, delta) => {
     const v = Math.min(F_MAX[k], Math.max(F_MIN[k], pm[k] + delta));
     if (v === pm[k]) return;
-    const next = { ...pm, [k]: v };
-    setPm(next);
-    onUpdate(next);
-    S.get(`u:${user.un}`).then((u) => S.set(`u:${user.un}`, { ...(u || {}), pm: { ...(u?.pm || {}), w: next.w, sb: next.sb, lb: next.lb } }));
+    update({ [k]: v });
   };
 
   return (
@@ -4714,12 +4860,107 @@ function FocusPreferences({ user, onUpdate }) {
             </div>
           ))}
         </div>
+        <div style={{ borderTop: `1px solid ${K.border}`, marginTop: 18, paddingTop: 16 }}>
+          <label style={{ display: "flex", gap: 10, alignItems: "center", color: K.txt, fontSize: 13 }}>
+            <input type="checkbox" checked={Boolean(pm.interfaceSounds)} onChange={(event) => update({ interfaceSounds: event.target.checked })} /> Completion sounds
+          </label>
+          <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap", marginTop: 12 }}>
+            <select aria-label="Completion sound" value={pm.soundId || "focus"} onChange={(event) => update({ soundId: event.target.value })} style={{ ...inpSt(), width: "auto", flex: 1 }}>
+              {SOUND_OPTIONS.map((sound) => <option key={sound.id} value={sound.id}>{sound.name}</option>)}
+            </select>
+            <button type="button" className="b" onClick={() => playSound(pm.soundId || "focus", pm.soundVolume ?? .5)} style={{ ...tag(false, K.acc), padding: "9px 14px", color: K.txt }}>Preview</button>
+          </div>
+          <label style={{ display: "flex", gap: 12, alignItems: "center", marginTop: 12, color: K.sub, fontSize: 12 }}>Volume
+            <input aria-label="Sound volume" type="range" min="0" max="1" step=".05" value={pm.soundVolume ?? .5} onChange={(event) => update({ soundVolume: Number(event.target.value) })} style={{ flex: 1, accentColor: K.acc }} />
+          </label>
+        </div>
       </div>
 
   );
 }
 
+function HiddenWebsiteSettings({ user }) {
+  const [draft, setDraft] = useState("");
+  const [targets, setTargets] = useState([]);
+  const [message, setMessage] = useState("");
+  const [saving, setSaving] = useState(false);
+  const sites = user.hiddenUsageSites || [];
+  useEffect(() => {
+    let dead = false;
+    const load = async () => {
+      const [rows, extension, desktop] = await Promise.all([
+        readUsageHistory(user.authLinked ? supabase : null, user.id, "1970-01-01", new Date().toISOString().slice(0, 10)).catch(() => []),
+        readExtensionUsage().catch(() => ({})), readDesktopUsage(user.id).catch(() => []),
+      ]);
+      const observed = [...rows, ...desktop.map((row) => ({ ...row, kind: "app" })), ...(extension.accountId === user.id ? (extension.usageToday || []).map((row) => ({ kind: "website", name: row.host })) : [])];
+      const entries = new Map();
+      for (const row of observed) {
+        if (!row.name || (row.kind === "app" && isSystemApp(row.name))) continue;
+        const name = row.kind === "app" ? normalizeApp(row.name) : normalizeHost(row.name);
+        if (name) entries.set(row.kind === "app" ? `app:${name}` : name, { name, kind: row.kind });
+      }
+      if (!dead) setTargets([...entries].sort((a, b) => a[1].name.localeCompare(b[1].name)));
+    };
+    load(); window.addEventListener("north:sync", load);
+    return () => { dead = true; window.removeEventListener("north:sync", load); };
+  }, [user.id, user.un, user.authLinked]);
+  const save = async (input, remove = false) => {
+    const host = input.startsWith("app:") ? `app:${normalizeApp(input.slice(4))}` : normalizeHost(input);
+    if (!host) { setMessage("Enter a valid website, such as example.com."); return; }
+    setSaving(true);
+    try {
+      const key = PROFILE_KEY(user.un);
+      const profile = await S.get(key);
+      if (!profile) throw new Error("Your profile is unavailable. Refresh North and retry.");
+      const existing = profile.hiddenUsageSites || [];
+      const next = remove ? existing.filter((site) => site !== host) : [...new Set([...existing, host])].sort();
+      await S.set(key, { ...profile, hiddenUsageSites: next });
+      setDraft("");
+      const result = SYNC.ready() ? await SYNC.flushProfile(user.un) : null;
+      setMessage(result?.ok ? "Hidden website preferences saved to your account." : "Saved on this device. Account sync will retry when connected.");
+      if (result?.ok) await requestExtensionSync().catch(() => {});
+      window.dispatchEvent(new Event("north:sync"));
+    } catch (error) { setMessage(error.message || "Could not save changes."); }
+    finally { setSaving(false); }
+  };
+  return <section style={{ ...card(), marginBottom: 12 }} aria-labelledby="hidden-sites-heading">
+    <h3 id="hidden-sites-heading" style={{ ...sectionTitle(), margin: "0 0 8px" }}>Hidden websites and apps</h3>
+    <p style={{ color: K.sub, fontSize: 13, lineHeight: 1.5 }}>Choose from your recorded activity. Hidden items are excluded from reports and totals; their limits still apply.</p>
+    <form className="north-inline-form" onSubmit={(event) => { event.preventDefault(); save(draft); }} style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "flex-start" }}>
+      <div style={{ flex: "1 1 240px", minWidth: 0 }}><FocusTaskPicker label="Website or app to hide" emptyLabel="Choose a website or app…" tasks={targets.filter(([key]) => !sites.includes(key)).map(([key, item]) => ({ id: key, title: `${item.name} · ${item.kind === "app" ? "app" : "website"}` }))} value={draft} onChange={(value) => setDraft(value || "")} /></div>
+      <button className="b" type="submit" disabled={saving || !draft} style={{ ...tag(true, K.acc), padding: "10px 14px" }}>Hide selected</button>
+    </form>
+    {sites.length ? sites.map((host) => <div key={host} className="flow-target-row"><strong style={{ overflowWrap: "anywhere" }}>{host.startsWith("app:") ? `${host.slice(4)} · app` : host}</strong><button className="b" type="button" disabled={saving} onClick={() => save(host, true)} aria-label={`Show ${host} in usage reports`} style={{ color: K.acc, padding: 10 }}>Show again</button></div>) : <p style={{ color: K.sub, fontSize: 12 }}>No hidden items.</p>}
+    {message && <p role="status" style={{ color: K.sub, fontSize: 12 }}>{message}</p>}
+  </section>;
+}
+
 function SettingsScreen({ user, envId, envPhoto, onEnv, onPhoto, onPhotoAdj, onRemovePhoto, onLogout, onName }) {
+  const [volume, setVolume] = useState(user.pm?.soundVolume ?? .5);
+  const volumeWrites = useRef(Promise.resolve());
+  useEffect(() => { setVolume(user.pm?.soundVolume ?? .5); }, [user.pm?.soundVolume]);
+  const changeVolume = (event) => {
+    const value = Number(event.target.value);
+    setVolume(value);
+    volumeWrites.current = volumeWrites.current.catch(() => {}).then(async () => {
+      const key = PROFILE_KEY(user.un); const profile = await S.get(key);
+      if (profile) await S.set(key, { ...profile, pm: { ...profile.pm, soundVolume: value } });
+    });
+  };
+  const [interfaceSounds, setInterfaceSounds] = useState(Boolean(user.pm?.interfaceSounds));
+  useEffect(() => {
+    S.get(`u:${user.un}`).then((profile) => setInterfaceSounds(Boolean(profile?.pm?.interfaceSounds)));
+  }, [user.un, user.pm?.interfaceSounds]);
+  const changeInterfaceSounds = async (enabled) => {
+    setInterfaceSounds(enabled);
+    const key = `u:${user.un}`;
+    const profile = await S.get(key);
+    if (profile) await S.set(key, { ...profile, pm: { ...(profile.pm || {}), interfaceSounds: enabled } });
+    if (SYNC.ready()) {
+      const result = await SYNC.flushProfile(user.un);
+      if (result.ok) await requestExtensionSync().catch(() => {});
+    }
+  };
   const [name, setName] = useState(user.name || "");
   const [saved, setSaved] = useState(false);
   const [photoSettingsOpen, setPhotoSettingsOpen] = useState(false);
@@ -4753,6 +4994,16 @@ function SettingsScreen({ user, envId, envPhoto, onEnv, onPhoto, onPhotoAdj, onR
   return (
     <div className="npage">
       <h2 style={{ ...pageTitle(), margin: "0 0 20px" }}>Settings</h2>
+      <section style={{ ...card(), marginBottom: 12 }} aria-label="Sound preferences">
+        <label style={{ display: "flex", alignItems: "center", gap: 12, color: K.txt }}>
+          <input type="checkbox" checked={interfaceSounds} onChange={(event) => changeInterfaceSounds(event.target.checked)} />
+          Completion sounds
+        </label>
+        <p style={{ fontSize: 12, color: K.sub }}>Distinct sounds for tasks, Pomodoros, break endings, streaks and achievements.</p>
+        <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>{["task", "focus", "break", "streak", "achievement"].map((id) => <button className="b" type="button" key={id} onClick={() => playSound(id, volume)} style={{ ...tag(false, K.acc), padding: "10px 14px", color: K.txt }}>{SOUND_OPTIONS.find((s) => s.id === id)?.name}</button>)}</div>
+        <label style={{ display: "flex", alignItems: "center", gap: 12, marginTop: 12, fontSize: 13, color: K.sub }}>Volume <input type="range" aria-label="Completion sound volume" min="0" max="1" step=".05" value={volume} onChange={changeVolume} onPointerUp={() => playSound("task", volume)} style={{ flex: 1, accentColor: K.acc }} /><output>{Math.round(volume * 100)}%</output></label>
+      </section>
+      <HiddenWebsiteSettings user={user} />
 
       {/* Account */}
       <div style={{ ...card(), padding: "14px 16px", marginBottom: 12 }}>
@@ -4928,7 +5179,7 @@ function SettingsScreen({ user, envId, envPhoto, onEnv, onPhoto, onPhotoAdj, onR
           </div>
         )}
         <p style={{ fontSize: 11, color: K.muted, margin: "9px 0 0", lineHeight: 1.55 }}>
-          {envId === "custom" ? "Custom photo stays on this device." : user.authLinked ? "Your theme choice syncs with your account." : "Saved on this device — sign in to sync it."} The glass picks up the environment’s colors automatically.
+          {user.authLinked ? "Your wallpaper and adjustments sync with your account." : "Saved on this device — sign in to sync it."} The glass picks up the environment’s colors automatically.
         </p>
         {/* Hidden file input for Add photo. */}
         <input ref={photoInput} type="file" accept="image/*" style={{ display: "none" }}
@@ -5006,6 +5257,20 @@ function SettingsScreen({ user, envId, envPhoto, onEnv, onPhoto, onPhotoAdj, onR
 // ══════════════════════════════════════════════════════════════════════════
 export default function App() {
   const [user,  setUser]  = useState(null);
+  const accountSyncReady = Boolean(SYNC?.ready());
+  useEffect(() => {
+    let alive = true;
+    const refresh = async (event) => {
+      if (!user?.un || event.detail?.key !== PROFILE_KEY(user.un)) return;
+      const profile = await S.get(PROFILE_KEY(user.un));
+      if (alive && profile) setUser((current) => current?.un === user.un
+        ? { ...profile, un: current.un, id: current.id, authLinked: current.authLinked } : current);
+    };
+    window.addEventListener("north:store", refresh);
+    return () => { alive = false; window.removeEventListener("north:store", refresh); };
+  }, [user?.un]);
+  const adoption = useRef(null);
+  useEffect(() => startDesktopBridge({ user, client: supabase, store: S, sync: SYNC }), [user?.id, user?.un]);
   const extensionConnectRef = useRef("");
   const [extensionConnectStatus, setExtensionConnectStatus] = useState(null);
   useEffect(() => {
@@ -5027,9 +5292,8 @@ export default function App() {
   const [scrl,  setScrl]  = useState(false); // content overlapping the sticky header?  // ── ENVIRONMENT ────────────────────────────────────────────────────
   const previewHarness = isPreviewHarness();
   // The background IS the theme. A preset id, or "custom" with an uploaded
-  // photo + adjustments. Device-local (`fl_env`), plus the photo payload in
-  // `fl_env_photo` (data URL, size-checked — this is a wallpaper, not user
-  // content for sync). The palette and glass material both derive from the
+  // photo + adjustments. Local cache plus an account-owned, dated appearance
+  // document; photo payloads are size-checked. The palette and glass derive from the
   // active environment every render pass.
   const [envId, setEnvId] = useState(() => {
     try {
@@ -5043,20 +5307,23 @@ export default function App() {
     return null;
   });
   const themeWrite = useRef(Promise.resolve());
-  const setEnv = (id) => {
+  const appearanceRef = useRef(null);
+  const setEnv = (id, photo = envPhoto) => {
     if (!isKnownEnv(id) && id !== "custom") return;
     setEnvId(id);
-    // A custom wallpaper is device-local; only named presets are account
-    // preferences. Never let a profile round-trip replace this device's photo.
-    if (isKnownEnv(id)) setUser((current) => current ? { ...current, theme: id } : current);
-    if (user?.un && isKnownEnv(id)) {
+    const appearance = { id, at: Date.now(), ...(id === "custom" && photo?.data ? { photo } : {}) };
+    appearanceRef.current = appearance;
+    try { localStorage.setItem("north:appearance", JSON.stringify({ un: user?.un, ...appearance })); } catch {}
+    // Persist the same dated appearance document for presets and custom photos.
+    setUser((current) => current ? { ...current, theme: id, appearance } : current);
+    if (user?.un) {
       const un = user.un;
       const intent = { un, id, at: Date.now() };
       try { localStorage.setItem(THEME_INTENT_KEY, JSON.stringify(intent)); } catch {}
       themeWrite.current = themeWrite.current.catch(() => {}).then(async () => {
         const profile = await S.get(PROFILE_KEY(un));
         if (profile) {
-          await S.set(PROFILE_KEY(un), { ...profile, theme: id });
+          await S.set(PROFILE_KEY(un), { ...profile, theme: id, appearance });
           const result = await SYNC.flushProfile(un).catch(() => null);
           if (result?.ok) clearThemeIntent(intent);
         }
@@ -5064,16 +5331,17 @@ export default function App() {
       });
     }
   };
-  const setPhotoAdj = (patch) => setEnvPhoto((p) => {
-    const next = p ? { ...p, adj: { ...PHOTO_DEFAULTS, ...(p.adj || {}), ...patch } } : null;
+  const setPhotoAdj = (patch) => {
+    const next = envPhoto ? { ...envPhoto, adj: { ...PHOTO_DEFAULTS, ...(envPhoto.adj || {}), ...patch } } : null;
+    setEnvPhoto(next);
     try { if (next) localStorage.setItem("fl_env_photo", JSON.stringify(next)); } catch {}
-    return next;
-  });
+    if (next) setEnv("custom", next);
+  };
   const addPhoto = (data) => {
     if (typeof data !== "string" || !data.startsWith("data:image/") || data.length > 4.5 * 1024 * 1024) return false;
     const rec = { data, adj: { ...PHOTO_DEFAULTS } };
     setEnvPhoto(rec);
-    setEnv("custom");
+    setEnv("custom", rec);
     try { localStorage.setItem("fl_env_photo", JSON.stringify(rec)); } catch { /* too large for storage — session-only */ }
     return true;
   };
@@ -5092,6 +5360,20 @@ export default function App() {
   useEffect(() => {
     try { localStorage.setItem("fl_env", envId); } catch {}
   }, [envId]);
+  useEffect(() => {
+    if (!user?.un) return;
+    let saved = null;
+    try { const value = JSON.parse(localStorage.getItem("north:appearance")); if (value?.un === user.un) saved = value; } catch {}
+    const next = newestAppearance(user.appearance, saved);
+    if (!next || (!isKnownEnv(next.id) && next.id !== "custom")) return;
+    appearanceRef.current = next;
+    setEnvId(next.id);
+    if (next.id === "custom") setEnvPhoto(next.photo);
+    try {
+      localStorage.setItem("north:appearance", JSON.stringify({ un: user.un, ...next }));
+      if (next.photo) localStorage.setItem("fl_env_photo", JSON.stringify(next.photo));
+    } catch {}
+  }, [user?.un, user?.appearance]);
 
   // A password-reset link signs the person in with a PASSWORD_RECOVERY session.
   // Catch that event and route to the set-a-new-password screen instead of
@@ -5212,16 +5494,25 @@ export default function App() {
     return () => clearInterval(iv);
   }, [user, remLedger]);
   // Adopt the account's saved environment at sign-in. The web persists the
-  // environment preference into profiles.settings.theme (a plain string id);
-  // photo payloads stay device-local — the account carries only the choice.
+  // environment preference and dated custom-photo document in account settings.
   // Deliberately sequential, not a race: the cloud value is peeked BEFORE
   // bootstrap so a stale local value can never overwrite the cloud one.
   const applyAccountTheme = async (profile) => {
+    const { data } = await supabase.from("profiles").select("settings").eq("id", profile.id).maybeSingle();
+    let saved = null;
+    try { const value = JSON.parse(localStorage.getItem("north:appearance")); if (value?.un === profile.un) saved = value; } catch {}
+    const appearance = newestAppearance(data?.settings?.appearance, profile.appearance, saved);
+    if (appearance) {
+      setEnvId(appearance.id);
+      if (appearance.photo) setEnvPhoto(appearance.photo);
+      const next = { ...profile, theme: appearance.id, appearance };
+      await S.set(PROFILE_KEY(profile.un), next);
+      return next;
+    }
     const pending = readThemeIntent(profile.un);
     if (pending && !isKnownEnv(pending.id)) clearThemeIntent(pending);
     // Keep a wallpaper explicitly selected on this device across reloads and
     // account hydration. Preset themes can sync; uploaded image data cannot.
-    if (envId === "custom" && envPhoto?.data) return profile;
     // A freshly chosen theme is written synchronously before its network push.
     // If the page closes or reloads mid-request, recover that intent before
     // pulling the older account copy; clear it only after the push succeeds.
@@ -5252,12 +5543,13 @@ export default function App() {
       }
       return profile;
     }
-    // Nothing on the cloud yet: this device's choice is the newest intent.
+    // A new account starts with the default rather than another account's cached photo.
     try {
       const p = await S.get(`u:${profile.un}`);
-      if (p) await S.set(`u:${profile.un}`, { ...p, theme: envId });
+      if (p) await S.set(`u:${profile.un}`, { ...p, theme: DEFAULT_ENV_ID });
     } catch { /* storage unavailable — env just stays device-local */ }
-    return { ...profile, theme: envId };
+    setEnvId(DEFAULT_ENV_ID);
+    return { ...profile, theme: DEFAULT_ENV_ID };
   };
 
   // Scroll-edge chrome (apple-design skill §12): the frosted header carries no
@@ -5311,20 +5603,28 @@ export default function App() {
    * unknown account from the sign-in intent is signed back out and refused;
    * from the sign-up intent it is admitted and profiled as a new account.
    */
-  const adoptAccount = async (accountUser, oauthIntent = null) => {
+  const adoptAuthenticatedAccount = async (accountUser, oauthIntent = null) => {
+    if (!oauthIntent) {
+      try {
+        oauthIntent = sessionStorage.getItem("north:oauth-intent");
+        if (oauthIntent) sessionStorage.removeItem("north:oauth-intent");
+      } catch { /* ordinary restored session */ }
+    }
     // OAuth gate: does this fresh session already have a North account?
     // Only consulted when the provider may have created a brand-new auth user
     // AND the person was on the sign-in screen (supabase-js carries no
     // is-new-user flag through the redirect, so this is the honest check).
     if (accountUser?.id && oauthIntent === "signin") {
-      const exists = await SYNC.hasAccount();
+      const exists = await SYNC.hasAccount(accountUser.id);
       const verdict = resolveOAuthIntent({ accountExists: exists, intent: oauthIntent });
       if (verdict.action === "refuse") {
+        setOauthRefused({ refused: verdict.reason, email: accountUser?.email || "" });
         try { if (supabaseConfigured && supabase) await supabase.auth.signOut(); } catch {}
         SYNC.detach();
         return { refused: verdict.reason, email: accountUser?.email || "" };
       }
     }
+    setOauthRefused(null);
     const un = usernameFromEmail(accountUser?.email, accountUser?.id);
     const existing =
       (await loadProfile(un)) || (await findProfileByEmail(accountUser?.email));
@@ -5361,12 +5661,22 @@ export default function App() {
         if (result?.ok) clearThemeIntent(pendingTheme);
       }
       if (fromAccount) {
-        if (envId !== "custom" && fromAccount.theme && isKnownEnv(fromAccount.theme)) setEnvId(fromAccount.theme);
+        if (!validAppearance(fromAccount.appearance) && envId !== "custom" && fromAccount.theme && isKnownEnv(fromAccount.theme)) setEnvId(fromAccount.theme);
         return toAppUser(accountUser, fromAccount);
       }
       return themed;
     }
     return mapped;
+  };
+
+  const adoptAccount = (accountUser, intent = null) => {
+    if (adoption.current?.id === accountUser?.id) return adoption.current.promise;
+    const promise = adoptAuthenticatedAccount(accountUser, intent);
+    adoption.current = { id: accountUser?.id, promise };
+    promise.finally(() => {
+      if (adoption.current?.promise === promise) adoption.current = null;
+    }).catch(() => {});
+    return promise;
   };
 
   // A Google arrival that was refused: new account via the sign-in screen.
@@ -5409,7 +5719,10 @@ export default function App() {
           return;
         }
         const mapped = await adoptAccount(accountUser).catch(() => null);
-        if (mapped && live && ticket === transition) setUser(mapped);
+        if (mapped && live && ticket === transition) {
+          if (mapped.refused) { setOauthRefused(mapped); setUser(null); }
+          else setUser(mapped);
+        }
       });
     });
     return () => {
@@ -5419,6 +5732,36 @@ export default function App() {
     // Auth subscription is intentionally installed once for this app mount.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  // Realtime is an account-scoped invalidation signal. Pull the profile before
+  // updating React state so limits/tasks never render an event payload that has
+  // not passed through the normal RLS-protected sync path.
+  useEffect(() => {
+    if (!user?.id || !user?.un || !accountSyncReady) return undefined;
+    let live = true;
+    const refresh = async ({ table } = {}) => {
+      if (!live) return;
+      window.dispatchEvent(new Event("north:sync"));
+      if (table !== "profiles") return;
+      // Retain offline edits when the network is still unavailable. Pulling
+      // over a failed queue would replace the values needed for its retry.
+      const pushed = await SYNC.flush("reconnect").catch(() => ({ ok: false }));
+      if (!live || !pushed.ok) return;
+      await SYNC.pull(user.un).catch(() => {});
+      if (!live) return;
+      const profile = await loadProfile(user.un);
+      if (!profile) return;
+      setUser((current) => current?.un === user.un
+        ? cachedSessionUser(profile, { id: current.id, authLinked: current.authLinked })
+        : current);
+    };
+    SYNC.startRealtime(refresh);
+    const poll = () => { if (document.visibilityState === "visible") refresh({ table: "profiles" }).catch(() => {}); };
+    const timer = setInterval(poll, 30000);
+    window.addEventListener("online", poll);
+    document.addEventListener("visibilitychange", poll);
+    return () => { live = false; clearInterval(timer); window.removeEventListener("online", poll); document.removeEventListener("visibilitychange", poll); SYNC.stopRealtime(); };
+  }, [user?.id, user?.un, accountSyncReady]);
 
   // Boot: the device record first (so the app works offline and with no account
   // service configured), then Supabase's own session, which wins over it.
@@ -5480,7 +5823,7 @@ export default function App() {
         // the pulled profile is the newest statement of intent, so follow it.
         // Uploaded wallpapers are a device-local override, never replaced by
         // the account's preset while refreshing a screen.
-        if (!(envId === "custom" && envPhoto?.data) && isKnownEnv(u.theme)) setEnvId(u.theme);
+        if (!validAppearance(u.appearance) && !appearanceRef.current && !(envId === "custom" && envPhoto?.data) && isKnownEnv(u.theme)) setEnvId(u.theme);
       }
     });
   };  const TABS = [
@@ -5519,7 +5862,7 @@ export default function App() {
 
   const pages = user ? {
     home:     <Home     user={user} go={goTab} />,
-    focus:    <Focus    user={user} envId={envId} envPhoto={envPhoto} go={goTab} />,
+    focus:    <Focus    user={user} envId={envId} envPhoto={envPhoto} go={goTab} active={tab === "focus"} />,
     tasks:    <Tasks    user={user} go={goTab} />,
     calendar: <Cal      user={user} />,
     flow:     <Blocking user={user} />,
@@ -5641,7 +5984,7 @@ export default function App() {
       </header>
 
       {/* ─ Content ─ */}
-      <main key={tab} className="pge north-content" style={{ position: "relative", zIndex: 1 }}>
+      <main className="pge north-content" style={{ position: "relative", zIndex: 1 }}>
         {previewHarness && (
           <div role="status" style={{
             margin: "14px 20px 0", padding: "9px 12px", borderRadius: 10,
@@ -5651,12 +5994,10 @@ export default function App() {
             Preview data only — this is not a signed-in account. <a href="/" style={{ color: K.acc, fontWeight: 650 }}>Open the live local app</a> to use your account.
           </div>
         )}
-        {/* key forces a fresh mount on tab change: Focus reads the pomodoro
-            profile into local state once, and without a remount a duration
-            edited on the Settings page wouldn't reach the dial until reload. */}
-        <div key={tab} style={{ display: "contents" }}>
-          {pages[tab]}
+        <div key={`focus:${user.id || user.un}`} style={{ display: tab === "focus" ? "contents" : "none" }}>
+          {pages.focus}
         </div>
+        {tab !== "focus" && <div key={tab} style={{ display: "contents" }}>{pages[tab]}</div>}
         <div style={{ height: 110 }} aria-hidden="true" />
       </main>
 

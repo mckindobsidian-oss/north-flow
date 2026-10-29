@@ -8,6 +8,8 @@
  */
 import { WEEKDAY_LABELS, WORKDAYS } from "./lib/blocking.js";
 import { encodeReason, scheduleNames, describeBlock } from "./lib/block-reason.js";
+import { applyTheme } from "./lib/appearance.js";
+import { NORTH_WEB_ORIGINS } from "./lib/external.js";
 
 const $ = (id) => document.getElementById(id);
 const send = (msg) => chrome.runtime.sendMessage(msg);
@@ -43,14 +45,14 @@ function renderUsage(rows, from, to) {
   const totalSeconds = list.reduce((sum, row) => sum + (Number(row.seconds) || 0), 0);
   const maxSeconds = Math.max(1, ...list.map((row) => Number(row.seconds) || 0));
   $("usageTotal").textContent = usageLabel(totalSeconds);
-  $("usageCount").textContent = `${list.length} site${list.length === 1 ? "" : "s"}`;
+  $("usageCount").textContent = `${list.length} item${list.length === 1 ? "" : "s"}`;
   $("usageNote").textContent = list.length
-    ? `Stored browsing usage · ${from === to ? from : `${from} to ${to}`}`
-    : `No browsing recorded for ${from === to ? from : "this date range"}`;
+    ? `Activity · ${from === to ? from : `${from} to ${to}`}`
+    : `No activity recorded for ${from === to ? from : "this date range"}`;
   if (!list.length) ul.append(el("li", { className: "muted", textContent: "No browsing recorded for this period" }));
-  for (const { host, seconds } of list) {
+  for (const { host, seconds, kind } of list) {
     const li = el("li", { className: "usage-row" });
-    li.append(el("span", { className: "grow", textContent: host }));
+    li.append(el("span", { className: "grow", textContent: `${host}${kind === "app" ? " · app" : ""}` }));
     const bar = el("span", { className: "usage-bar" });
     bar.append(el("i", { style: { width: `${Math.max(3, Math.round((Number(seconds) || 0) / maxSeconds * 100))}%` } }));
     li.append(bar, el("span", { className: "muted", textContent: usageLabel(seconds) }));
@@ -62,17 +64,14 @@ async function refreshUsageRange() {
   const from = $("usageFrom").value || dayKey();
   const to = $("usageTo").value || from;
   const result = await send({ type: "getUsageRange", from, to });
-  if (result?.ok) { usageRange = result; renderUsage(result.usage, result.from, result.to); }
+  if (result?.ok) { usageRange = result; render(); }
 }
 
 // ── render ────────────────────────────────────────────────────────────────
 function render() {
   const s = snapshot;
   if (!s) return;
-  const theme = ["event-horizon", "violet-dusk", "obsidian-flow", "ember-horizon", "monochrome-terrain", "sculpted-bronze", "luminous-violet"].includes(s.theme) ? s.theme : "sculpted-bronze";
-  document.body.dataset.theme = theme;
-  const wallpaper = theme === "sculpted-bronze" ? "sculpted-bronze-ribbon.png" : theme === "luminous-violet" ? "luminous-violet-ribbon.png" : `${theme}.png`;
-  document.body.style.setProperty("--wallpaper", `url("wallpapers/${wallpaper}")`);
+  applyTheme(s.theme, s.appearance);
 
   // Status (already phrased by the shared engine)
   $("statusIcon").textContent = s.status.active ? "●" : "○";
@@ -163,27 +162,25 @@ function render() {
 
   const limitList = $("limitList");
   limitList.replaceChildren();
-  if (!s.usageLimits.length) limitList.append(el("li", { className: "muted", textContent: "No website limits yet" }));
-  for (const limit of s.usageLimits) {
-    const li = el("li", {});
-    li.append(el("span", { className: "grow", textContent: limit.name ? `${limit.name} · ${limit.target}` : limit.target, title: limit.target }));
-    const minutesUsed = Math.floor(limit.usedSeconds / 60);
-    li.append(el("span", { className: `tag ${limit.reached ? "on" : "ok"}`, textContent: limit.mode === "session" ? "PER VISIT" : limit.reached ? "LIMIT REACHED" : `${minutesUsed}/${limit.dailyLimitMinutes}m` }));
-    if (limit.mode !== "session") {
-      const amount = el("select", {
-        className: "limit-select",
-        attrs: { "aria-label": `Daily allowance for ${limit.target}` },
-        onchange: async (event) => { await send({ type: "setUsageLimit", id: limit.id, minutes: Number(event.target.value) }); await refresh(); },
-      });
-      for (const [value, label] of [[15, "15m/day"], [30, "30m/day"], [60, "1h/day"], [120, "2h/day"], [240, "4h/day"]]) amount.append(el("option", { value: String(value), textContent: label }));
-      amount.value = String(limit.dailyLimitMinutes);
-      li.append(amount);
+  const limits = [...s.usageLimits, ...s.websites.map((rule) => ({ ...rule, rule: true })), ...s.appRules.map((rule) => ({ ...rule, rule: true }))];
+  if (!limits.length) limitList.append(el("li", { className: "muted", textContent: "No limits yet. Create one in North Flow." }));
+  for (const limit of limits) {
+    const li = el("li", { className: "limit-row" });
+    const info = el("div", { className: "limit-copy" });
+    info.append(el("strong", { textContent: limit.name || limit.label || limit.target }));
+    const allowance = limit.rule
+      ? limit.when === "scheduled" ? "Scheduled block" : limit.when === "focus" ? "During focus" : "Always blocked"
+      : limit.mode === "session" ? limit.kind === "app" ? `${usageLabel(limit.dailyLimitMinutes * 60)} per session` : "Allowance chosen per visit" : `${usageLabel(limit.dailyLimitMinutes * 60)} per day`;
+    info.append(el("small", { textContent: `${limit.target} · ${allowance}` }));
+    if (limit.rule && limit.when === "scheduled") {
+      const schedules = s.schedules.filter((schedule) => !limit.scheduleIds?.length || limit.scheduleIds.includes(schedule.id));
+      for (const schedule of schedules) info.append(el("small", { textContent: `${schedule.days.map((day) => WEEKDAY_LABELS[day]).join(", ")} · ${schedule.start}–${schedule.end}` }));
     }
-    li.append(el("button", {
-      className: "x", textContent: "✕",
-      attrs: { "aria-label": `Remove daily limit for ${limit.target}` },
-      onclick: async () => { await send({ type: "removeUsageLimit", id: limit.id }); await refresh(); },
-    }));
+    if (!limit.rule && limit.mode === "daily" && Number.isFinite(limit.usedSeconds)) {
+      info.append(el("small", { textContent: `${usageLabel(limit.usedSeconds)} used · ${usageLabel(Math.max(0, limit.dailyLimitMinutes * 60 - limit.usedSeconds))} remaining` }));
+    }
+    const status = !limit.enabled ? "Paused" : limit.kind === "app" ? "Desktop" : limit.reached || limit.reasons ? "Blocked" : "Active";
+    li.append(info, el("span", { className: `tag ${status === "Blocked" ? "on" : "ok"}`, textContent: status }));
     limitList.append(li);
   }
 
@@ -257,14 +254,22 @@ function render() {
   if (!$("usageFrom").value) $("usageFrom").value = dayKey();
   if (!$("usageTo").value) $("usageTo").value = dayKey();
   if (usageRange) renderUsage(usageRange.usage, usageRange.from, usageRange.to);
-  else renderUsage(s.usageToday, dayKey(), dayKey());
+  else renderUsage((s.activityToday || s.usageToday).filter((row) => !row.kind || row.kind === "website"), dayKey(), dayKey());
+  const desktopRows = s.desktopUsageToday || [];
+  $("desktopUsageList").replaceChildren(...desktopRows.map((row) => el("li", { className: "usage-row" }, [
+    el("span", { className: "grow", textContent: row.name }),
+    el("span", { className: "muted", textContent: usageLabel(row.seconds) }),
+  ])));
+  $("desktopUsageNote").textContent = desktopRows.length
+    ? "Synced from North Desktop"
+    : "No desktop activity synced today";
   $("audioTracking").checked = Boolean(s.trackBackgroundAudio);
-  const week = s.usageWeek || [];
+  const week = usageRange?.chart || s.usageHourly || s.usageWeek || [];
   const maxDay = Math.max(1, ...week.map((day) => day.seconds));
   const graph = $("usageWeekGraph");
   graph.replaceChildren();
-  graph.setAttribute("aria-label", `Last seven days: ${week.map((day) => `${day.label} ${Math.round(day.seconds / 60)} minutes`).join(", ")}`);
-  for (const day of week) {
+  graph.setAttribute("aria-label", `Activity: ${week.map((day) => `${day.label} ${usageLabel(day.seconds)}`).join(", ")}`);
+  for (const [index, day] of week.entries()) {
     const col = document.createElement("div");
     col.title = `${day.day}: ${Math.round(day.seconds / 60)}m`;
     col.style.cssText = "flex:1;display:flex;flex-direction:column;justify-content:flex-end;align-items:center;gap:3px";
@@ -273,17 +278,9 @@ function render() {
     const label = document.createElement("span");
     label.className = "muted";
     label.style.fontSize = "9px";
-    label.textContent = day.label;
+    label.textContent = index % Math.max(1, Math.ceil(week.length / 6)) === 0 ? day.label : "";
     col.append(bar, label);
     graph.append(col);
-  }
-  // Blocked attempts are counted locally (never uploaded — see README), and
-  // they are the half of screen time the person actually wants to see.
-  for (const { host, count } of ($("usageFrom").value === dayKey() && $("usageTo").value === dayKey() ? s.blockedToday : []) || []) {
-    const li = el("li", {});
-    li.append(el("span", { className: "grow", textContent: host }));
-    li.append(el("span", { className: "tag on", textContent: `${count} BLOCKED` }));
-    $("usageList").append(li);
   }
 
   // Account + honest scope note
@@ -308,9 +305,26 @@ async function refresh() {
   const next = await send({ type: "getState" });
   snapshot = next;
   render();
+  send({ type: 'focusRank' }).then(result => {
+    const rank = result?.mine;
+    $("focusRank").textContent = rank ? `Global focus rank #${rank.rank} · ${Math.floor(Number(rank.focus_minutes) / 60)}h ${Number(rank.focus_minutes) % 60}m focused` : 'Global focus ranking available when connected to your account.';
+    if (result?.ok && result.rows?.length) {
+      $("focusRank").style.whiteSpace = 'pre-line';
+      const leaders = result.rows.filter(row => Number(row.rank) <= 3).map(row => `#${row.rank} ${row.name || row.un} · ${Number(row.focus_minutes)}m`).join('\n');
+      $("focusRank").append(document.createTextNode(`\n\nGlobal leaders\n${leaders}`));
+    }
+  }).catch(() => { $("focusRank").textContent = 'Global ranking temporarily unavailable.'; });
 }
 
 // ── wiring ────────────────────────────────────────────────────────────────
+$("refreshNorth").onclick = async () => {
+  const button = $("refreshNorth"); button.disabled = true; button.textContent = "Syncing…";
+  try {
+    const result = await send({ type: "syncAccount" });
+    if (!result?.ok) throw new Error(result?.error || result?.reason || "Account sync unavailable");
+    location.reload();
+  } catch (error) { button.disabled = false; button.textContent = "↻ Refresh sync"; $("aboutLine").textContent = `Refresh failed: ${error.message}`; }
+};
 document.querySelectorAll("#focusRow .chip").forEach((b) => {
   b.onclick = async () => {
     await send({ type: "startFocus", minutes: Number(b.dataset.min) });
@@ -445,12 +459,12 @@ async function openNorthFlow({ connect = false } = {}) {
   const pageOrigin = (url) => {
     try {
       const origin = new URL(url || "").origin;
-      return ["http://localhost:5173", "http://localhost:5174", "https://north.vercel.app"].includes(origin) ? origin : "";
+      return NORTH_WEB_ORIGINS.includes(origin) ? origin : "";
     } catch { return ""; }
   };
   const activeOrigin = pageOrigin(current[0]?.url);
   const openNorthTab = [...tabs].filter((tab) => pageOrigin(tab.url)).sort((a, b) => (b.lastAccessed || 0) - (a.lastAccessed || 0))[0];
-  const dashboard = new URL(activeOrigin || pageOrigin(openNorthTab?.url) || northWebUrl || "https://north.vercel.app");
+  const dashboard = new URL(activeOrigin || pageOrigin(openNorthTab?.url) || pageOrigin(northWebUrl) || "http://localhost:5174");
   dashboard.searchParams.set("tab", "flow");
   if (connect) {
     const nonce = crypto.randomUUID();

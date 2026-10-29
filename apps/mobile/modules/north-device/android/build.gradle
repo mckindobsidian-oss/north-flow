@@ -1,0 +1,8 @@
+apply plugin: 'com.android.library'
+apply plugin: 'expo-module-gradle-plugin'
+group = 'com.north.device'
+version = '0.2.0'
+android {
+  namespace 'com.north.device'
+  defaultConfig { versionCode 2; versionName '0.2.0' }
+}

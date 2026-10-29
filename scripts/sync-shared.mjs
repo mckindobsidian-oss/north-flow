@@ -22,7 +22,7 @@ import { fileURLToPath } from "node:url";
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 
 /** Canonical sources, in dependency order. */
-export const CANONICAL = ["blocking.js", "account.js"];
+export const CANONICAL = ["blocking.js", "account.js", "activity.js"];
 
 /** Where each client keeps its generated copy. */
 export const TARGETS = [

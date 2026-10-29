@@ -18,6 +18,13 @@
  * the package is installed, persistence is automatic with zero code change.
  */
 
+import 'react-native-url-polyfill/auto';
+import Constants from 'expo-constants';
+import { requireOptionalNativeModule } from 'expo-modules-core';
+import { installPkceCrypto } from './pkce-crypto.js';
+import { secureSession } from './secure-session.js';
+export const securePkceReady = Boolean(requireOptionalNativeModule('ExpoCrypto')) &&
+  installPkceCrypto(globalThis, require('expo-crypto'));
 let AsyncStorage = null;
 try {
   // Optional at build time; resolved by Metro when the package is installed.
@@ -51,8 +58,8 @@ export const sessionsPersist = Boolean(AsyncStorage);
 // native module; the two public values live in app.json → expo.extra, which
 // `app.config.js`-free setups populate via eas/env or a local gitignored
 // override. Placeholders behave exactly like on web: unconfigured, not fatal.
-const url = process.env?.EXPO_PUBLIC_SUPABASE_URL || null;
-const anonKey = process.env?.EXPO_PUBLIC_SUPABASE_ANON_KEY || null;
+const url = process.env.EXPO_PUBLIC_SUPABASE_URL || Constants.expoConfig?.extra?.supabaseUrl || null;
+const anonKey = process.env.EXPO_PUBLIC_SUPABASE_ANON_KEY || Constants.expoConfig?.extra?.supabaseAnonKey || null;
 
 const placeholder = (v) => !v || /^your_/i.test(String(v).trim());
 
@@ -66,7 +73,8 @@ if (supabaseConfigured) {
   const { createClient } = require("@supabase/supabase-js");
   client = createClient(url, anonKey, {
     auth: {
-      storage,
+      storage: secureSession,
+      flowType: 'pkce',
       autoRefreshToken: true,
       persistSession: true,
       detectSessionInUrl: false, // sessions arrive via deep link, not a URL bar

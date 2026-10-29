@@ -1,5 +1,41 @@
 # NORTH — Mobile App (Expo / React Native)
 
+## Current Android implementation (2026-10-24)
+
+The native entry is `index.js → MobileRoot.jsx → MobileMain.jsx`. This is native React Native UI with a Kotlin device module, not a hosted website. It uses the existing Supabase project and shared sync/account/rules code. The older scaffold notes below are historical and do not describe the current Android entry.
+
+### Install / build
+
+From the repository root on this Windows machine:
+
+```powershell
+./scripts/build-android.ps1
+./scripts/verify-android.ps1 -Apk artifacts/North-Android-universal.apk -Architecture universal
+node scripts/serve-android.mjs
+```
+
+Output after a successful build: `artifacts/North-Android-universal.apk` (0.2.1, Android 8+, ARM/Intel, 32/64-bit). The download script prints a local Wi-Fi URL; open that URL on the phone on the same network. It serves only the APK and download instructions, never source files. Transfer the complete file, open it and allow installation from the transferring app if Android asks. This is a personally signed sideload build, not a Google Play release. Keep `apps/mobile/.signing/` private and backed up securely; it is needed to sign future updates. Never commit it. If installation fails, connect an authorized USB-debugging phone and run `./scripts/install-android.ps1` to obtain the actual INSTALL_FAILED code. Do not uninstall an older build without preserving any unsynced local data.
+
+Native monitoring does not run in Expo Go. A development build can be launched with `npx expo run:android` after installing dependencies and an Android toolchain. Public Supabase configuration is taken from the existing web environment at build time; never put a service-role key into mobile config.
+
+### Required one-time setup
+
+1. In the **existing** Supabase project → Authentication → URL Configuration, allow `north://auth`. Google continues to use the existing Supabase Google provider. No separate Android Google client secret is embedded.
+2. Sign in on the phone with the same North account. In Flow, use **Refresh sync** to reconcile saved edits, rules and usage. The status line reports sync success or a recoverable error.
+3. In North Settings, grant **Usage Access**, **Display over other apps** and notification permission, then enable monitoring. These are explicit Android settings; North cannot grant them for you.
+4. Optional: enable **North browser access** in Accessibility for supported-browser address-bar attribution. Only domain names are retained; unsupported/hidden address bars fall back to app usage. Without this permission browser time is app time, not fabricated website time.
+5. Optional: enable website DNS blocking and approve the Android VPN prompt, then tap Enable again. This local DNS filter does not inspect TLS; secure DNS/cached connections can bypass it, and Android permits only one VPN at a time.
+
+### Scope and safety
+
+- Native Home, Focus, Tasks, Calendar, Flow, Social and Settings; existing account appearance, tasks, focus history, streak flags, hidden items, rules and usage records.
+- Foreground service with a visible notification, screen-lock checks and no inferred suspension gaps. Browser time replaces app attribution to avoid double-counting. Offline counters are owner-scoped and uploaded with stable per-device/day/target keys.
+- Shared website budgets include cached account totals, refreshed every 30 seconds while online. This is eventual consistency, not an atomic quota lock across offline devices. Android package IDs and Windows executables remain different app targets.
+- Auth tokens use SecureStore/Android KeyStore, backup is disabled, and logout stops monitoring and removes active native credentials. No microphone/storage access is needed for completion sounds.
+- A physical phone is still required to verify permission dialogs, battery restrictions, browser coverage, Google return and enforcement. See `VERIFICATION.md` for honest test status. iOS Screen Time enforcement and store submission are **not** included.
+
+## Historical scaffold documentation (superseded above)
+
 The phone client of the same product. It shares the web app's tab structure,
 its blocking model, and (once the backend lands) the same Supabase account.
 

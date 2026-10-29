@@ -10,11 +10,12 @@
  */
 import { useState } from "react";
 import {
-  ActivityIndicator, KeyboardAvoidingView, Platform,
+  ActivityIndicator, Image, KeyboardAvoidingView, Platform,
   ScrollView, Text, TextInput, TouchableOpacity, View,
 } from "react-native";
-import { Ionicons } from "@expo/vector-icons";
+import Ionicons from './NorthIcon.jsx';
 import { StatusBar } from "expo-status-bar";
+import { GLASS, MobileBackdrop } from './MobileAppearance.jsx';
 
 import { signInWithPassword, signUpWithPassword, resendConfirmation, signInWithGoogle, supabaseConfigured } from "./lib/auth.js";
 
@@ -31,7 +32,7 @@ export default function AuthScreen({ dark, onAuthed }) {
   const [resendAt, setResendAt] = useState(0);
 
   const g = dark
-    ? { bg: "#0A0A0E", sheet: "rgba(28,28,34,0.82)", edge: "rgba(255,255,255,0.09)", txt: "#F2F2F7", sub: "#98989E", input: "rgba(28,28,34,0.55)", acc: "#0A84FF" }
+    ? { bg: "#070816", sheet: GLASS, edge: "rgba(255,255,255,0.22)", txt: "#F7F5FF", sub: "#D2CEDF", input: "rgba(255,255,255,0.09)", acc: "#A996E8" }
     : { bg: "#EEF1F8", sheet: "rgba(255,255,255,0.80)", edge: "rgba(0,0,0,0.08)", txt: "#1C1C1E", sub: "#6D6D72", input: "rgba(255,255,255,0.6)", acc: "#007AFF" };
 
   const waiting = resendAt > Date.now();
@@ -96,27 +97,27 @@ export default function AuthScreen({ dark, onAuthed }) {
       onChangeText={onChange}
       autoCapitalize="none"
       autoCorrect={false}
-      placeholderTextColor={dark ? "#636366" : "#AFAFB6"}
+      placeholderTextColor={dark ? "#C5BFD2" : "#6D6D72"}
       style={{
         backgroundColor: g.input, borderRadius: 12, borderWidth: 1, borderColor: g.edge,
-        color: g.txt, fontSize: 15, paddingHorizontal: 14, paddingVertical: 12,
+        color: g.txt, fontSize: 16, minHeight: 48, paddingHorizontal: 14, paddingVertical: 12,
       }}
       {...extra}
     />
   );
 
   return (
-    <View style={{ flex: 1, backgroundColor: g.bg }}>
+    <MobileBackdrop>
       <StatusBar style={dark ? "light" : "dark"} />
       <KeyboardAvoidingView behavior={Platform.OS === "ios" ? "padding" : undefined} style={{ flex: 1 }}>
-        <ScrollView contentContainerStyle={{ flexGrow: 1, justifyContent: "center", padding: 24 }}>
+        <ScrollView keyboardShouldPersistTaps="handled" contentContainerStyle={{ flexGrow: 1, justifyContent: "center", padding: 24, paddingVertical: 56 }}>
           <View style={{
             backgroundColor: g.sheet, borderRadius: 22, borderWidth: 1, borderColor: g.edge,
-            padding: 26, shadowColor: "#000", shadowOpacity: 0.12, shadowRadius: 24, shadowOffset: { width: 0, height: 10 },
+            padding: 24, width: '100%', maxWidth: 460, alignSelf: 'center', shadowColor: "#000", shadowOpacity: 0.12, shadowRadius: 24, shadowOffset: { width: 0, height: 10 },
           }}>
             <View style={{ flexDirection: "row", alignItems: "center", gap: 10, marginBottom: 18 }}>
-              <View style={{ width: 38, height: 38, borderRadius: 12, backgroundColor: g.acc, alignItems: "center", justifyContent: "center" }}>
-                <Ionicons name="compass" size={20} color="#fff" />
+              <View style={{ width: 38, height: 38, borderRadius: 12, alignItems: "center", justifyContent: "center" }}>
+                <Image source={require('../../react-app/public/north-logo.png')} style={{width:38,height:38,borderRadius:12}} />
               </View>
               <View>
                 <Text style={{ fontSize: 17, fontWeight: "800", color: g.txt, letterSpacing: -0.3 }}>NORTH</Text>
@@ -128,7 +129,7 @@ export default function AuthScreen({ dark, onAuthed }) {
             <View style={{ flexDirection: "row", backgroundColor: g.input, borderRadius: 10, padding: 3, marginBottom: 18 }}>
               {[["login", "Log in"], ["register", "Sign up"]].map(([id, lbl]) => (
                 <TouchableOpacity key={id} style={{
-                  flex: 1, paddingVertical: 8, borderRadius: 8, alignItems: "center",
+                  flex: 1, minHeight: 44, justifyContent: 'center', paddingVertical: 8, borderRadius: 8, alignItems: "center",
                   backgroundColor: mode === id ? g.sheet : "transparent",
                 }} onPress={() => { setMode(id); setErr(""); setSentTo(""); }}
                   accessibilityRole="tab" accessibilityState={{ selected: mode === id }}>
@@ -169,7 +170,7 @@ export default function AuthScreen({ dark, onAuthed }) {
                   accessibilityRole="button" accessibilityState={{ disabled: busy }}
                   style={{ marginTop: 14, backgroundColor: g.acc, borderRadius: 12, paddingVertical: 14, alignItems: "center", flexDirection: "row", justifyContent: "center", gap: 8, opacity: busy ? 0.7 : 1 }}>
                   {busy && <ActivityIndicator size="small" color="#fff" />}
-                  <Text style={{ color: "#fff", fontWeight: "600", fontSize: 14 }}>{busy ? "···" : mode === "login" ? "Log in" : "Create account"}</Text>
+                  <Text style={{ color: "#0B0B0E", fontWeight: "700", fontSize: 15 }}>{busy ? "Please wait…" : mode === "login" ? "Log in" : "Create account"}</Text>
                 </TouchableOpacity>
 
                 {/* Google — real PKCE flow via the north:// deep link. Same
@@ -190,11 +191,11 @@ export default function AuthScreen({ dark, onAuthed }) {
               </>
             )}
           </View>
-          <Text style={{ textAlign: "center", fontSize: 10.5, color: g.sub, marginTop: 14, lineHeight: 17 }}>
-            Your tasks, boards and focus history sync to your NORTH account — sign in on any device and they're there.
+          <Text style={{ textAlign: "center", fontSize: 12, color: g.sub, marginTop: 18, lineHeight: 19, maxWidth: 460, alignSelf: 'center' }}>
+            Your tasks, limits and focus history sync to your NORTH account — sign in on any device and they're there.
           </Text>
         </ScrollView>
       </KeyboardAvoidingView>
-    </View>
+    </MobileBackdrop>
   );
 }

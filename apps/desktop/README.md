@@ -7,22 +7,29 @@ frontend is a plain web page and can move to Electron unchanged.
 
 ## Run it
 
-Prerequisites: **Rust** (stable) + **Node.js**. Then, from this folder:
+Prerequisites on Windows: **Node.js**, **Rust stable (MSVC)**, Microsoft C++ Build Tools and the Windows SDK. Then, from the project root:
 
 ```bash
-npm install                # installs @tauri-apps/cli (first run only)
-npm run tauri dev          # compiles the Rust core and opens the window
+npm install --prefix apps/desktop
+npm run desktop:dev
+# Testable debug executable, without an installer:
+npm run desktop:build -- --debug --no-bundle
+# Installer/release bundle:
+npm run desktop:build
 ```
 
-> The desktop UI is its own frontend in `dist/` (plain HTML/CSS/JS). It talks
-> to the Rust core for native process monitoring, usage sampling and blocking.
->
-> ⚠️ **`cargo check` has not been run yet**: this file's Rust was written in an
-> environment without a Rust toolchain. Run `npm run tauri dev` (or
-> `cargo check` in `src-tauri/`) first — if `sysinfo`/`chrono` resolve to
-> different versions, that is where it will show up.
+The app bundles the full React interface from `react-app/dist`; it runs locally with the same account, tasks, Focus, Calendar, Flow and sound preferences as the website. A native bridge supplies foreground app usage and applies account limits to the Rust enforcer. Website blocking remains the browser extension's job.
+
+The debug executable is `apps/desktop/src-tauri/target/debug/north-desktop.exe`. Closing its window hides it to the tray; use **Quit** in the tray menu to stop the app. Windows `cargo check`, a debug build, and a native smoke launch passed on 2026-10-21. The WebView uses a dedicated `$LOCALDATA/NorthDesktop` data root so it cannot collide with another WebView runtime. Interactive Google sign-in still needs a real provider round-trip; release testing requires the deployed website origin and Supabase redirect allowlist.
 
 ## What this actually does
+
+Google sign-in returns directly to the native loopback listener. In Supabase
+Authentication → URL Configuration, add `http://127.0.0.1:*/north-auth/*`
+to Redirect URLs. The random port and one-use nonce change per attempt;
+PKCE exchanges the returned code only inside the desktop app. No hosted
+website relay is required. Set Site URL to your actual website, not an
+unverified example domain.
 
 - **Application rules, persisted** — a JSON file in the app config dir
   (`north-blocking.json`), shaped exactly like the shared model
@@ -44,11 +51,17 @@ npm run tauri dev          # compiles the Rust core and opens the window
 - **A protected-process denylist** — shells, session managers and NORTH itself
   are never terminated, whatever a rule says.
 - **Foreground app usage (Windows)** — while signed into NORTH, a background
-  sampler records only the foreground executable name and active seconds (idle
+  sampler checks every second and records only the foreground executable name and active seconds (idle
   after 60 seconds is excluded; browser processes are excluded to keep web and
   desktop usage separate). It stores at most 90 days locally and upserts daily
-  totals into `usage_records` with the desktop account's own JWT. macOS/Linux
+  totals into `usage_records` with a stable local collector id and the desktop account's own JWT. macOS/Linux
   collection is not implemented; no window title or content is captured.
+- **Tray sync** — the native collector emits a heartbeat every ten seconds to
+  keep the account bridge active while North is hidden. Cloud snapshots upload
+  about once per minute and appear in website Flow and the extension's Desktop
+  activity list. Offline native rules and usage remain local until sync returns.
+  Closing the window keeps tracking; tray **Quit** stops it. North does not
+  automatically start with Windows.
 - The page degrades gracefully in a plain browser (no `window.__TAURI__`) and
   says so, rather than appearing to block things.
 

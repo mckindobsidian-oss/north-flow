@@ -202,10 +202,10 @@ export function normalizeState(state) {
       const kind = limit?.kind === "app" ? "app" : "website";
       const target = kind === "app" ? normalizeApp(limit?.target) : normalizeHost(limit?.target);
       const mode = limit?.mode === "session" ? "session" : "daily";
-      if (!target || (mode === "session" && kind !== "website") || (mode === "daily" && (!Number.isInteger(minutes) || minutes < 1))) return null;
+      if (!target || ((mode === "daily" || kind === "app") && (!Number.isInteger(minutes) || minutes < 1))) return null;
       return {
         id: limit?.id || newId("l"), kind, target, mode,
-        ...(mode === "daily" ? { dailyLimitMinutes: Math.min(1440, minutes) } : {}),
+        ...(mode === "daily" || kind === "app" ? { dailyLimitMinutes: Math.min(mode === "session" ? 240 : 1440, minutes) } : {}),
         name: typeof limit?.name === "string" ? limit.name.trim().slice(0, 60) : "",
         enabled: limit?.enabled !== false,
       };
@@ -434,12 +434,12 @@ export function upsertUsageLimit(state, limit) {
   const s = normalizeState(state);
   const kind = limit?.kind === "app" ? "app" : "website";
   const target = kind === "app" ? normalizeApp(limit?.target) : normalizeHost(limit?.target);
-  const mode = limit?.mode === "session" && kind === "website" ? "session" : "daily";
+  const mode = limit?.mode === "session" ? "session" : "daily";
   const minutes = Number(limit?.dailyLimitMinutes);
-  if (!target || (mode === "daily" && (!Number.isInteger(minutes) || minutes < 1))) return s;
+  if (!target || ((mode === "daily" || kind === "app") && (!Number.isInteger(minutes) || minutes < 1))) return s;
   const next = {
     id: limit.id || newId("l"), kind, target, mode,
-    ...(mode === "daily" ? { dailyLimitMinutes: Math.min(1440, minutes) } : {}),
+    ...(mode === "daily" || kind === "app" ? { dailyLimitMinutes: Math.min(mode === "session" ? 240 : 1440, minutes) } : {}),
     name: typeof limit.name === "string" ? limit.name.trim().slice(0, 60) : "",
     enabled: limit.enabled !== false,
   };

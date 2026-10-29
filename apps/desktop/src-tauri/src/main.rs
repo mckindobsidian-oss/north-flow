@@ -35,6 +35,8 @@
 
 use std::collections::HashMap;
 use std::fs;
+use std::io::{Read, Write};
+use std::net::TcpListener;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -42,7 +44,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use chrono::{Datelike, Local, Timelike, Weekday};
 use serde::{Deserialize, Serialize};
 use sysinfo::{ProcessesToUpdate, System};
-use tauri::{Manager, State};
+use tauri::{Emitter, Manager, State};
 
 // ── shared model ──────────────────────────────────────────────────────────
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -87,6 +89,7 @@ struct UsageLimit {
 fn default_limit_kind() -> String { "website".into() }
 fn default_limit_mode() -> String { "daily".into() }
 type Usage = HashMap<String, HashMap<String, HashMap<String, u64>>>;
+type HourlyUsage = HashMap<String, HashMap<String, HashMap<String, HashMap<String, u64>>>>;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -182,9 +185,13 @@ struct AppState {
     blocking: Mutex<BlockingState>,
     events: Mutex<Vec<EnforcementEvent>>,
     usage: Mutex<Usage>,
+    hourly_usage: Mutex<HourlyUsage>,
+    session_usage: Mutex<HashMap<String, HashMap<String, u64>>>,
+    remote_usage: Mutex<Usage>,
     usage_owner: Mutex<Option<String>>,
     path: PathBuf,
     usage_path: PathBuf,
+    hourly_usage_path: PathBuf,
 }
 
 type R<T> = Result<T, String>;
@@ -197,6 +204,8 @@ const PROTECTED: &[&str] = &[
     "services", "lsass", "svchost", "explorer", "dwm", "taskhostw", "sihost", "ctfmon",
     "launchd", "kernel_task", "windowserver", "loginwindow", "finder", "dock", "systemd",
     "init", "gnome-shell", "kwin", "plasmashell", "xorg", "wayland", "north-desktop",
+    "searchapp", "searchhost", "searchui", "startmenuexperiencehost", "shellexperiencehost",
+    "lockapp", "textinputhost", "runtimebroker", "widgets", "widgetservice",
 ];
 
 const BROWSERS: &[&str] = &["brave", "brave-browser", "chrome", "chromium", "edge", "msedge", "firefox", "google-chrome", "opera", "vivaldi"];
@@ -214,11 +223,17 @@ fn save_usage(state: &AppState) {
     if let Some(data) = state.usage.lock().ok().and_then(|usage| serde_json::to_vec(&*usage).ok()) {
         let _ = fs::write(&state.usage_path, data);
     }
+    if let Some(data) = state.hourly_usage.lock().ok().and_then(|usage| serde_json::to_vec(&*usage).ok()) {
+        let _ = fs::write(&state.hourly_usage_path, data);
+    }
+    if let Some(data) = state.remote_usage.lock().ok().and_then(|usage| serde_json::to_vec(&*usage).ok()) {
+        let _ = fs::write(state.usage_path.with_file_name("north-remote-usage.json"), data);
+    }
 }
 
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
-struct UsageRow { day: String, name: String, seconds: u64 }
+struct UsageRow { day: String, name: String, seconds: u64, hourly: HashMap<String, u64> }
 
 fn foreground_app() -> Option<String> {
     #[cfg(target_os = "windows")]
@@ -267,12 +282,18 @@ fn sample_foreground_usage(state: &AppState) {
         let day = utc_day(now_ms());
         let cutoff = utc_day(now_ms().saturating_sub(90 * 86_400_000));
         let mut usage = state.usage.lock().unwrap();
-        let days = usage.entry(owner).or_default();
+        let days = usage.entry(owner.clone()).or_default();
         days.retain(|date, _| date >= &cutoff);
-        let seconds = days.entry(day).or_default().entry(name).or_default();
-        *seconds += 5;
+        let seconds = days.entry(day.clone()).or_default().entry(name.clone()).or_default();
+        *seconds += 1;
         drop(usage);
-        save_usage(state);
+        let mut hourly = state.hourly_usage.lock().unwrap();
+        let days = hourly.entry(owner.clone()).or_default();
+        days.retain(|date, _| date >= &cutoff);
+        *days.entry(day).or_default().entry(name.clone()).or_default()
+            .entry(chrono::Utc::now().hour().to_string()).or_default() += 1;
+        drop(hourly);
+        *state.session_usage.lock().unwrap().entry(owner).or_default().entry(app_key(&name)).or_default() += 1;
     }
 }
 
@@ -298,7 +319,7 @@ fn app_key(name: &str) -> String {
 fn app_matches(process_name: &str, target: &str) -> bool {
     let p = app_key(process_name);
     let t = app_key(target);
-    !t.is_empty() && (p == t || p.contains(&t) || t.contains(&p))
+    !t.is_empty() && p == t
 }
 
 fn is_protected(name: &str) -> bool {
@@ -358,7 +379,7 @@ fn focus_active(state: &BlockingState, now_ms: u64) -> bool {
 
 /// Which application rules are active right now, and why. Mirrors
 /// `evaluateBlocking` for the app half of the model.
-fn active_app_rules(state: &BlockingState, usage: &Usage, owner: Option<&str>) -> Vec<(Rule, String)> {
+fn active_app_rules(state: &BlockingState, usage: &Usage, owner: Option<&str>, sessions: &HashMap<String, HashMap<String, u64>>, remote_usage: &Usage) -> Vec<(Rule, String)> {
     let now_ms = now_ms();
     let today = Local::now();
     let running = active_schedules(state, today);
@@ -395,22 +416,29 @@ fn active_app_rules(state: &BlockingState, usage: &Usage, owner: Option<&str>) -
         }
         out.push((rule.clone(), reason));
     }
-    if let Some(today_usage) = owner
-        .and_then(|id| usage.get(id))
-        .and_then(|days| days.get(&utc_day(now_ms())))
-    {
+    if let Some(owner) = owner {
+        let day = utc_day(now_ms);
+        let local = usage.get(owner).and_then(|days| days.get(&day));
+        let remote = remote_usage.get(owner).and_then(|days| days.get(&day));
         for limit in state.usage_limits.iter().filter(|limit| limit.enabled && limit.kind == "app" && limit.mode == "daily" && limit.daily_limit_minutes > 0) {
-            let used: u64 = today_usage.iter()
+            let used: u64 = local.into_iter().chain(remote).flat_map(|apps| apps.iter())
                 .filter(|(name, _)| app_key(name) == app_key(&limit.target))
                 .map(|(_, seconds)| *seconds)
                 .sum();
             if used < u64::from(limit.daily_limit_minutes) * 60
-                || state.unblocks.get(&limit.id).map(|until| *until > now_ms()).unwrap_or(false)
+                || state.unblocks.get(&limit.id).map(|until| *until > now_ms).unwrap_or(false)
             { continue; }
             out.push((Rule {
                 id: limit.id.clone(), kind: "app".into(), target: limit.target.clone(), label: limit.target.clone(),
                 enabled: true, when: "always".into(), schedule_ids: Vec::new(),
             }, "daily usage limit".into()));
+        }
+    }
+    if let Some(used) = owner.and_then(|id| sessions.get(id)) {
+        for limit in state.usage_limits.iter().filter(|limit| limit.enabled && limit.kind == "app" && limit.mode == "session" && limit.daily_limit_minutes > 0) {
+            if used.get(&app_key(&limit.target)).copied().unwrap_or(0) < u64::from(limit.daily_limit_minutes) * 60
+                || state.unblocks.get(&limit.id).map(|until| *until > now_ms).unwrap_or(false) { continue; }
+            out.push((Rule { id: limit.id.clone(), kind: "app".into(), target: limit.target.clone(), label: limit.target.clone(), enabled: true, when: "always".into(), schedule_ids: Vec::new() }, "session usage limit".into()));
         }
     }
     out
@@ -454,18 +482,24 @@ fn snapshot_processes() -> Vec<AppInfo> {
 
 /// End every live process that matches an active app rule.
 fn enforce(state: &Arc<AppState>) -> usize {
+    let mut sys = System::new();
+    sys.refresh_processes(ProcessesToUpdate::All, true);
+    {
+        let mut sessions = state.session_usage.lock().unwrap();
+        for used in sessions.values_mut() {
+            used.retain(|name, _| sys.processes().values().any(|process| app_matches(&process.name().to_string_lossy(), name)));
+        }
+    }
     let active: Vec<(Rule, String)> = {
         let owner = state.usage_owner.lock().unwrap().clone();
         let usage = state.usage.lock().unwrap();
         let guard = state.blocking.lock().unwrap();
-        active_app_rules(&guard, &usage, owner.as_deref())
+        active_app_rules(&guard, &usage, owner.as_deref(), &state.session_usage.lock().unwrap(), &state.remote_usage.lock().unwrap())
     };
     if active.is_empty() {
         return 0;
     }
 
-    let mut sys = System::new();
-    sys.refresh_processes(ProcessesToUpdate::All, true);
     let mut killed = 0usize;
     let mut events: Vec<EnforcementEvent> = Vec::new();
 
@@ -505,6 +539,69 @@ fn enforce(state: &Arc<AppState>) -> usize {
 }
 
 // ── commands ──────────────────────────────────────────────────────────────
+fn oauth_callback(target: &str, nonce: &str) -> Option<(String, String)> {
+    let url = tauri::Url::parse(&format!("http://127.0.0.1{target}")).ok()?;
+    if url.path() != format!("/north-auth/{nonce}") { return None; }
+    let code = url.query_pairs().find(|(key, _)| key == "code").map(|(_, value)| value.into_owned()).unwrap_or_default();
+    let error = url.query_pairs().find(|(key, _)| key == "error").map(|(_, value)| value.into_owned()).unwrap_or_default();
+    if code.is_empty() && error.is_empty() { return None; }
+    Some((code, error))
+}
+
+#[tauri::command]
+fn begin_google_auth(app: tauri::AppHandle, nonce: String) -> R<String> {
+    if nonce.len() != 36 || !nonce.chars().all(|ch| ch.is_ascii_hexdigit() || ch == '-') {
+        return Err("Invalid sign-in request".into());
+    }
+    let listener = TcpListener::bind("127.0.0.1:0").map_err(|_| "Could not start local sign-in".to_string())?;
+    let address = listener.local_addr().map_err(|e| e.to_string())?;
+    listener.set_nonblocking(true).map_err(|e| e.to_string())?;
+    let callback = format!("http://127.0.0.1:{}/north-auth/{nonce}", address.port());
+    std::thread::spawn(move || {
+        let deadline = std::time::Instant::now() + Duration::from_secs(300);
+        while std::time::Instant::now() < deadline {
+            let Ok((mut stream, _)) = listener.accept() else { std::thread::sleep(Duration::from_millis(100)); continue; };
+            let _ = stream.set_read_timeout(Some(Duration::from_secs(2)));
+            let mut buffer = [0u8; 8192];
+            let Ok(size) = stream.read(&mut buffer) else { continue; };
+            let request = String::from_utf8_lossy(&buffer[..size]);
+            let mut parts = request.split_whitespace();
+            let method = parts.next().unwrap_or("");
+            let target = parts.next().unwrap_or("");
+            let result = if method == "GET" { oauth_callback(target, &nonce) } else { None };
+            let (status, body) = if result.is_some() {
+                ("200 OK", "<!doctype html><meta charset=utf-8><meta name=viewport content='width=device-width,initial-scale=1'><title>North Desktop</title><body style='margin:0;background:#191b24;color:#f8f9fc;font:16px system-ui;padding:48px'><h1>Return to North Desktop</h1><p>Your sign-in response has been received. Continue in the app.</p></body>")
+            } else { ("404 Not Found", "Not found") };
+            let response = format!("HTTP/1.1 {status}\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nCache-Control: no-store\r\nReferrer-Policy: no-referrer\r\nConnection: close\r\n\r\n{body}", body.len());
+            let _ = stream.write_all(response.as_bytes());
+            if let Some((code, error)) = result {
+                let _ = app.emit("north-oauth-return", serde_json::json!({ "nonce": nonce, "code": code, "error": error }));
+                break;
+            }
+        }
+    });
+    Ok(callback)
+}
+
+#[tauri::command]
+fn open_google_auth(url: String) -> R<()> {
+    let parsed = tauri::Url::parse(&url).map_err(|_| "Invalid sign-in URL".to_string())?;
+    if parsed.scheme() != "https" || !parsed.host_str().unwrap_or("").ends_with(".supabase.co")
+        || parsed.path() != "/auth/v1/authorize" || !parsed.username().is_empty() || parsed.password().is_some() {
+        return Err("Invalid sign-in URL".into());
+    }
+    if parsed.query_pairs().find(|(key, value)| key == "provider" && value == "google").is_none() {
+        return Err("Invalid sign-in provider".into());
+    }
+    #[cfg(target_os = "windows")]
+    let result = std::process::Command::new("rundll32.exe").args(["url.dll,FileProtocolHandler", &url]).spawn();
+    #[cfg(target_os = "macos")]
+    let result = std::process::Command::new("open").arg(&url).spawn();
+    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
+    let result = std::process::Command::new("xdg-open").arg(&url).spawn();
+    result.map(|_| ()).map_err(|_| "Could not open the browser. Please try again.".into())
+}
+
 #[tauri::command]
 fn get_state(state: Ctx<'_>) -> BlockingState {
     state.blocking.lock().unwrap().clone()
@@ -672,7 +769,7 @@ fn list_running_apps(state: Ctx<'_>) -> Status {
     let usage_owner = state.usage_owner.lock().unwrap().clone();
     let usage = state.usage.lock().unwrap();
     let guard = state.blocking.lock().unwrap();
-    let active = active_app_rules(&guard, &usage, usage_owner.as_deref());
+    let active = active_app_rules(&guard, &usage, usage_owner.as_deref(), &state.session_usage.lock().unwrap(), &state.remote_usage.lock().unwrap());
     let now = Local::now();
     let running: Vec<String> = active_schedules(&guard, now).iter().map(|s| s.name.clone()).collect();
     let focus = focus_active(&guard, now_ms());
@@ -698,20 +795,29 @@ fn enforcement_log(state: Ctx<'_>) -> Vec<EnforcementEvent> {
 }
 
 #[tauri::command]
-#[tauri::command]
 fn set_usage_owner(state: Ctx<'_>, owner: Option<String>) {
     *state.usage_owner.lock().unwrap() = owner;
+}
+
+#[tauri::command]
+fn set_remote_usage(state: Ctx<'_>, owner: String, day: String, usage: HashMap<String, u64>) {
+    if state.usage_owner.lock().unwrap().as_deref() != Some(owner.as_str()) || day != utc_day(now_ms()) { return; }
+    state.remote_usage.lock().unwrap().insert(owner, HashMap::from([(day, usage)]));
 }
 
 #[tauri::command]
 fn desktop_usage(state: Ctx<'_>, owner: String) -> Vec<UsageRow> {
     if state.usage_owner.lock().unwrap().as_deref() != Some(owner.as_str()) { return Vec::new(); }
     let usage = state.usage.lock().unwrap();
+    let hourly_usage = state.hourly_usage.lock().unwrap();
     let mut rows = Vec::new();
     if let Some(days) = usage.get(&owner) {
         for (day, apps) in days {
             for (name, seconds) in apps {
-                rows.push(UsageRow { day: day.clone(), name: name.clone(), seconds: *seconds });
+                if is_protected(name) { continue; }
+                let hourly = hourly_usage.get(&owner).and_then(|days| days.get(day))
+                    .and_then(|apps| apps.get(name)).cloned().unwrap_or_default();
+                rows.push(UsageRow { day: day.clone(), name: name.clone(), seconds: *seconds, hourly });
             }
         }
     }
@@ -775,6 +881,12 @@ fn link_account(state: Ctx<'_>, un: String) -> R<String> {
 
 fn main() {
     tauri::Builder::default()
+        .on_window_event(|window, event| {
+            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                api.prevent_close();
+                let _ = window.hide();
+            }
+        })
         .setup(|app| {
             use tauri::menu::{Menu, MenuItem};
             use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
@@ -787,20 +899,42 @@ fn main() {
             let _ = fs::create_dir_all(&dir);
             let path = dir.join("north-blocking.json");
             let usage_path = dir.join("north-usage.json");
+            let hourly_usage_path = dir.join("north-usage-hourly.json");
             let state = Arc::new(AppState {
                 blocking: Mutex::new(load(&path)),
                 events: Mutex::new(Vec::new()),
                 usage: Mutex::new(load_usage(&usage_path)),
+                hourly_usage: Mutex::new(fs::read(&hourly_usage_path).ok()
+                    .and_then(|bytes| serde_json::from_slice(&bytes).ok()).unwrap_or_default()),
+                session_usage: Mutex::new(HashMap::new()),
+                remote_usage: Mutex::new(load_usage(&usage_path.with_file_name("north-remote-usage.json"))),
+                usage_owner: Mutex::new(None),
                 path,
                 usage_path,
+                hourly_usage_path,
             });
             app.manage(state.clone());
             #[cfg(target_os = "windows")]
             {
                 let usage_state = app.state::<Arc<AppState>>().inner().clone();
-                std::thread::spawn(move || loop {
-                    std::thread::sleep(Duration::from_secs(5));
-                    sample_foreground_usage(&usage_state);
+                let usage_app = app.handle().clone();
+                std::thread::spawn(move || {
+                    let mut ticks = 0u8;
+                    loop {
+                        let started = std::time::Instant::now();
+                        std::thread::sleep(Duration::from_secs(1));
+                        // Do not charge the first sample after sleep/hibernation.
+                        if started.elapsed() < Duration::from_secs(2) {
+                            sample_foreground_usage(&usage_state);
+                        }
+                        ticks += 1;
+                        if ticks == 10 {
+                            ticks = 0;
+                            save_usage(&usage_state);
+                            // Native events keep account sync awake in the tray.
+                            let _ = usage_app.emit("north-desktop-tick", ());
+                        }
+                    }
                 });
             }
 
@@ -822,7 +956,10 @@ fn main() {
             }
             tray.on_menu_event(|app, event| match event.id.as_ref() {
                 "open" => show_main(app),
-                "quit" => app.exit(0),
+                "quit" => {
+                    save_usage(app.state::<Arc<AppState>>().inner());
+                    app.exit(0);
+                },
                 _ => {}
             })
             .on_tray_icon_event(|tray, event| {
@@ -839,6 +976,8 @@ fn main() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            begin_google_auth,
+            open_google_auth,
             get_state,
             apply_account_blocking,
             get_focus_state,
@@ -855,11 +994,61 @@ fn main() {
             list_running_apps,
             enforcement_log,
             desktop_usage,
+            set_remote_usage,
             set_usage_owner,
             link_account
         ])
         .run(tauri::generate_context!())
         .expect("error while running NORTH");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{oauth_callback, app_matches, active_app_rules, BlockingState, UsageLimit, Usage, utc_day, now_ms};
+    use std::collections::HashMap;
+
+    #[test]
+    fn daily_and_session_allowances_are_account_scoped() {
+        let mut state = BlockingState::default();
+        state.usage_limits.push(UsageLimit { id: "limit".into(), kind: "app".into(), target: "notepad".into(), mode: "daily".into(), daily_limit_minutes: 1, enabled: true });
+        let usage = Usage::from([("alice".into(), HashMap::from([(utc_day(now_ms()), HashMap::from([("notepad".into(), 30)]))]))]);
+        let remote = Usage::from([("alice".into(), HashMap::from([(utc_day(now_ms()), HashMap::from([("notepad".into(), 40)]))]))]);
+        let sessions = HashMap::from([("alice".into(), HashMap::from([("notepad".into(), 60)]))]);
+        assert_eq!(active_app_rules(&state, &usage, Some("alice"), &sessions, &remote).len(), 1);
+        assert!(active_app_rules(&state, &usage, Some("bob"), &sessions, &remote).is_empty());
+        state.usage_limits[0].mode = "session".into();
+        assert_eq!(active_app_rules(&state, &Usage::new(), Some("alice"), &sessions, &Usage::new()).len(), 1);
+        assert!(active_app_rules(&state, &usage, Some("alice"), &HashMap::new(), &remote).is_empty());
+    }
+
+    #[test]
+    fn app_rules_match_only_the_named_executable() {
+        assert!(app_matches("Notepad.EXE", "notepad"));
+        assert!(!app_matches("notepad++", "notepad"));
+        assert!(!app_matches("application", "app"));
+        assert!(!app_matches("notepad", ""));
+    }
+
+    #[test]
+    fn oauth_callback_requires_the_exact_nonce_path_and_a_result() {
+        let nonce = "12345678-1234-1234-1234-123456789abc";
+        assert_eq!(
+            oauth_callback(
+                &format!("/north-auth/{nonce}?code=one-use-code"),
+                nonce,
+            ),
+            Some(("one-use-code".into(), "".into()))
+        );
+        assert_eq!(
+            oauth_callback(
+                &format!("/north-auth/{nonce}?error=access_denied"),
+                nonce,
+            ),
+            Some(("".into(), "access_denied".into()))
+        );
+        assert_eq!(oauth_callback("/north-auth/wrong?code=leak", nonce), None);
+        assert_eq!(oauth_callback(&format!("/north-auth/{nonce}"), nonce), None);
+    }
 }
 
 fn show_main(app: &tauri::AppHandle) {
