@@ -1,5 +1,9 @@
 /* One continuous surface keeps a small browser popup calm and readable. */
 :root { --accent: #c5b7ff; color-scheme: dark; }
+body[data-color-mode="light"] { color-scheme: light; color:#202330; background-image:linear-gradient(#f6f7fbee,#f6f7fbee),var(--wallpaper); }
+body[data-color-mode="light"] :is(.muted,.sec,.acct,label,summary,#usageNote,#aboutLine,.chip,input,select,.tabbar button) { color:#30384e; }
+body[data-color-mode="light"] :is(input,select,.chip,.tabbar) { background:#ffffffc9; border-color:#26334a35; }
+body[data-color-mode="light"] .tabbar button[aria-selected="true"] { background:#ded8f5; color:#252039; }
 body { width: 370px; min-height: 0; padding: 20px; background-image: linear-gradient(160deg,rgba(15,17,25,.94),rgba(15,17,25,.88)), var(--wallpaper); color:#f7f8fc; font-size:13px; line-height:1.5; }
 body > h1 { margin:0 0 18px; gap:5px; font-size:16px; letter-spacing:-.3px; flex-wrap:wrap; }
 h1 .acct { order:2; width:100%; margin:2px 0 0 31px; padding:0; background:none; border:0; box-shadow:none; color:#c5c9d6; font-size:11px; font-weight:500; }

@@ -17,11 +17,12 @@ export const useMobileTheme = () => useContext(ThemeContext);
 export function MobileBackdrop({ profile, children }) {
   const id = profile?.appearance?.id || profile?.theme || 'violet-dusk';
   const environment = ENVIRONMENTS[id] || ENVIRONMENTS['violet-dusk'];
+  const light = profile?.pm?.colorMode === 'light';
   const source = id === 'custom' && profile?.appearance?.photo?.data
     ? { uri: profile.appearance.photo.data } : environment.image;
-  return <ThemeContext.Provider value={id === 'custom' ? { ...environment, accent: '#E8E5F1' } : environment}>
+  return <ThemeContext.Provider value={{ ...environment, light, ink: light ? '#202330' : '#fff', surface: light ? '#f7f8fff0' : GLASS }}>
     <ImageBackground source={source} resizeMode="cover" style={{ flex: 1 }}>
-      <View pointerEvents="none" style={[StyleSheet.absoluteFillObject, { backgroundColor: 'rgba(7,8,18,0.62)' }]} />
+      <View pointerEvents="none" style={[StyleSheet.absoluteFillObject, { backgroundColor: light ? 'rgba(247,248,255,0.82)' : 'rgba(7,8,18,0.62)' }]} />
       {children}
     </ImageBackground>
   </ThemeContext.Provider>;

@@ -448,3 +448,13 @@ Final packaging: the web production build and desktop debug build succeeded; the
 - BLOCKED: both live apply_migration attempts returned INVALID_ARGUMENT / invalid or expired requestState. The social migration was NOT applied. Manual SQL-editor execution of supabase/migrations/20261023160011_secure_social_requests.sql (or reconnecting the connector and applying it) remains necessary. No friend requests or user history were fabricated/deleted.
 - Verification so far: 57 sync/extension checks passed; one verified-session social test and one bundled-audio/zero-volume/licence test passed. JSX parser passed 41 files. Responsive check initially could not reach the stopped local dev server; it was restarted for the scoped phone/tablet run. Final build/layout results follow below.
 
+# 2026-10-29 — Mobile polish and shared preferences
+
+Release completion: North 0.2.6 universal APK (versionCode 8) built successfully with final contrast/scroll changes. Signature, 16 KB alignment, permission and backup verification passed. Updated Windows NSIS/MSI builds completed; extension 0.3.8 ZIP packaged. Public downloads are in the parent North directory. Phone touch scrolling and fresh authenticated extension-to-cloud usage still need a live device cycle after loading the new extension. No claim of runtime cross-device verification is made.
+
+Implemented: collapsed website/app limit selectors on mobile and web/desktop, collapsed streak goals, plain Home play icon, analytics Flow icon, revised settings icon, daily labels in mobile focus heatmap, calendar spacing, usage tracking disclosure with close control, mobile wallpaper picker, nested-scroll Spotify embed and account-saved playlist, shared light-mode setting on web/desktop/mobile/extension. Existing first-login permission onboarding retained.
+
+Browser-usage audit: cloud desktop records reached October 29; extension website records stopped October 23. Extension now waits for auth initialization before account operations and replays retained history using idempotent device upserts. Fresh browser upload still requires the updated extension worker to be loaded and authenticated; this has not been proven using a running browser in this pass.
+
+Verified: website production build, mobile JSX parsing, four focused preference/history/REST regression tests. Signed Android and desktop rebuilds started; artifact verification and physical Spotify scrolling/permission flows remain pending until recorded below.
+

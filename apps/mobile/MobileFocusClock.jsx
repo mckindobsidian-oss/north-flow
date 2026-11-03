@@ -2,8 +2,11 @@ import React, { useEffect, useRef, useState } from 'react';
 import { AccessibilityInfo, Animated, StyleSheet, Text, View, useWindowDimensions } from 'react-native';
 import Svg, { Circle } from 'react-native-svg';
 import { useMobileTheme } from './MobileAppearance.jsx';
+import { themeStyles } from './themeStyles.js';
 
 function FlipDigit({ value, reduced }) {
+  const s = themeStyles(baseStyles, useMobileTheme().light);
+  const { light } = useMobileTheme();
   const rotation = useRef(new Animated.Value(1)).current;
   const last = useRef(value);
   const [previous, setPrevious] = useState(value);
@@ -13,17 +16,22 @@ function FlipDigit({ value, reduced }) {
     if (old === value || reduced) { rotation.setValue(1); return; }
     setPrevious(old);
     rotation.setValue(0);
-    const animation = Animated.timing(rotation, { toValue: 1, duration: 280, useNativeDriver: true });
+    const animation = Animated.timing(rotation, { toValue: 1, duration: 520, useNativeDriver: true });
     animation.start();
     return () => animation.stop();
   }, [value, reduced, rotation]);
   return <View style={s.digit}>
     <Text allowFontScaling={false} style={s.digitText}>{value}</Text>
-    {!reduced && <Animated.View pointerEvents="none" style={[StyleSheet.absoluteFillObject, { borderRadius: 8, backgroundColor: '#44404f', justifyContent: 'center', alignItems: 'center', opacity: rotation.interpolate({ inputRange: [0,.8,1], outputRange: [1,1,0] }), transform: [{ perspective: 600 }, { rotateX: rotation.interpolate({ inputRange: [0,1], outputRange: ['0deg','-90deg'] }) }] }]}><Text allowFontScaling={false} style={s.digitText}>{previous}</Text></Animated.View>}
+    {!reduced && <>
+      <View pointerEvents="none" style={{position:'absolute',bottom:0,height:24,width:'100%',overflow:'hidden'}}><Text allowFontScaling={false} style={[s.digitText,{position:'absolute',top:-20,width:'100%',textAlign:'center'}]}>{previous}</Text></View>
+      <Animated.View pointerEvents="none" style={{position:'absolute',top:0,height:24,width:'100%',overflow:'hidden',backgroundColor:light?'#e8e9f2':'#44404f',backfaceVisibility:'hidden',transformOrigin:'bottom',transform:[{perspective:600},{rotateX:rotation.interpolate({inputRange:[0,.5,1],outputRange:['0deg','-90deg','-90deg']})}]}}><Text allowFontScaling={false} style={[s.digitText,{position:'absolute',top:4,width:'100%',textAlign:'center'}]}>{previous}</Text></Animated.View>
+      <Animated.View pointerEvents="none" style={{position:'absolute',bottom:0,height:24,width:'100%',overflow:'hidden',backgroundColor:light?'#e8e9f2':'#44404f',backfaceVisibility:'hidden',transformOrigin:'top',transform:[{perspective:600},{rotateX:rotation.interpolate({inputRange:[0,.5,1],outputRange:['90deg','90deg','0deg']})}]}}><Text allowFontScaling={false} style={[s.digitText,{position:'absolute',top:-20,width:'100%',textAlign:'center'}]}>{value}</Text></Animated.View>
+    </>}
     <View pointerEvents="none" style={s.seam} />
   </View>;
 }
 export function MobileFlipClock() {
+  const s = themeStyles(baseStyles, useMobileTheme().light);
   const [now, setNow] = useState(() => new Date());
   const [reduced, setReduced] = useState(true);
   useEffect(() => {
@@ -38,6 +46,7 @@ export function MobileFlipClock() {
   </React.Fragment>)}</View>;
 }
 export default function MobileFocusClock({ seconds, total, phase, color }) {
+  const s = themeStyles(baseStyles, useMobileTheme().light);
   const { accent } = useMobileTheme();
   const { width, height } = useWindowDimensions();
   const size = Math.max(170, Math.min(300, width * .78, height * .44));
@@ -54,7 +63,7 @@ export default function MobileFocusClock({ seconds, total, phase, color }) {
     <Text style={s.phase}>{phase.toUpperCase()}</Text>
   </View>;
 }
-const s = StyleSheet.create({
+const baseStyles = StyleSheet.create({
   dial: { alignSelf: 'center', justifyContent: 'center', alignItems: 'center', borderRadius: 180, backgroundColor: '#25252d85', borderWidth: 1, borderColor: '#ffffff45', marginTop: 8, marginBottom: 20 },
   time: { color: '#fff', fontSize: 54, fontWeight: '200', fontVariant: ['tabular-nums'], letterSpacing: -2 },
   phase: { color: '#ddd8e8', fontSize: 11, letterSpacing: 1.4, marginTop: 6 },

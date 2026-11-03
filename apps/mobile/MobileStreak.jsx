@@ -1,10 +1,13 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { AccessibilityInfo, Animated, Pressable, StyleSheet, Text, View } from 'react-native';
 import { localDay, streakSummary, STREAK_MILESTONES } from '../../react-app/src/lib/streak.js';
-import { GLASS } from './MobileAppearance.jsx';
+import { themeStyles } from './themeStyles.js';
+import { useMobileTheme, GLASS } from './MobileAppearance.jsx';
 
 export default function MobileStreak({ days = {}, onFocus, onTasks }) {
+  const s = themeStyles(baseStyles, useMobileTheme().light);
   const [expanded, setExpanded] = useState(false);
+  const [goalsOpen, setGoalsOpen] = useState(false);
   const [now, setNow] = useState(() => new Date());
   const glow = useRef(new Animated.Value(1)).current;
   const progress = streakSummary(days, now);
@@ -24,13 +27,13 @@ export default function MobileStreak({ days = {}, onFocus, onTasks }) {
     return () => { disposed = true; animation?.stop(); };
   }, [progress.lit, glow]);
   return <View style={s.card}>
-    <View style={s.row}><Text style={s.kicker}>YOUR DAILY SPARK</Text><Text style={s.hint}>Best · {progress.best} days</Text></View>
+    <View style={s.row}><Pressable accessibilityRole="button" accessibilityState={{expanded:goalsOpen}} onPress={() => setGoalsOpen(!goalsOpen)} style={{minHeight:44,justifyContent:"center"}}><Text style={s.kicker}>STREAK {goalsOpen ? "−" : "+"}</Text></Pressable><Text style={s.hint}>Best · {progress.best} days</Text></View>
     <View style={[s.row, { marginVertical: 16 }]}>
       <Animated.Text style={[s.flame, !progress.lit && { opacity: .6 }, { transform: [{ scale: glow }] }]} accessibilityLabel={progress.lit ? 'Flame lit today' : 'Flame not lit yet'}>🔥</Animated.Text>
       <View style={{ flex: 1 }}><Text style={s.count}>{progress.current}<Text style={s.unit}> day{progress.current === 1 ? '' : 's'}</Text></Text><Text style={s.hint}>{progress.lit ? 'Flame lit. Keep growing tomorrow.' : goals ? 'Halfway there. One more goal.' : 'Every streak starts with a spark.'}</Text></View>
     </View>
-    {[[progress.today.focus, 'Complete a Pomodoro', onFocus], [progress.today.task, 'Finish one task', onTasks]].map(([done, label, action]) => <Pressable key={label} accessibilityRole="button" onPress={action} style={[s.goal, done && s.done]}><Text style={s.text}>{done ? '✓' : '○'}  {label}</Text><Text style={s.hint}>{done ? 'Complete' : 'Start →'}</Text></Pressable>)}
-    <Text style={[s.hint, { marginTop: 10 }]}>{goals} of 2 goals complete today</Text>
+    {goalsOpen && [[progress.today.focus, 'Complete a Pomodoro', onFocus], [progress.today.task, 'Finish one task', onTasks]].map(([done, label, action]) => <Pressable key={label} accessibilityRole="button" onPress={action} style={[s.goal, done && s.done]}><Text style={s.text}>{done ? '✓' : '○'}  {label}</Text><Text style={s.hint}>{done ? 'Complete' : 'Start →'}</Text></Pressable>)}
+    <Text style={[s.hint, { marginTop: 10, display: goalsOpen ? "flex" : "none" }]}>{goals} of 2 goals complete today</Text>
     <View style={[s.row, { marginVertical: 16 }]}>{Array.from({ length: 7 }, (_, i) => {
       const date = new Date(now); date.setDate(date.getDate() - 6 + i);
       const day = days[localDay(date)] || {};
@@ -41,7 +44,7 @@ export default function MobileStreak({ days = {}, onFocus, onTasks }) {
     {expanded && STREAK_MILESTONES.map(([n, name]) => <View key={n} style={[s.goal, progress.best >= n && s.done]}><Text style={s.text}>{progress.best >= n ? '🔥' : '◇'} {name}</Text><Text style={s.hint}>{progress.best >= n ? 'Earned' : `${Math.min(progress.current, n)} / ${n} days`}</Text></View>)}
   </View>;
 }
-const s = StyleSheet.create({
+const baseStyles = StyleSheet.create({
   card: { padding: 20, borderRadius: 22, backgroundColor: GLASS, borderWidth: 1, borderColor: '#ffffff30', marginVertical: 12 },
   row: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', gap: 10 },
   kicker: { color: '#efce9a', fontSize: 10, fontWeight: '700', letterSpacing: 1.5 },

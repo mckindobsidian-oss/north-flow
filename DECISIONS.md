@@ -270,3 +270,7 @@ Friendships are created/accepted/removed exclusively by ownership-checked authen
 
 Prefer realtime/direct sync, backed by a 30-second online polling interval. Manual Refresh must distinguish account success from extension confirmation and retain queued edits on failure; sleeping/offline clients cannot be promised a wall-clock delivery guarantee.
 
+# 2026-10-29 — Shared presentation preferences and browser history repair
+
+Light/dark appearance and Spotify share links use the existing account-owned `settings.pm.colorMode` and `settings.pm.spotifyPlaylist` fields. Wallpaper uploads use the existing timestamped `appearance.photo` document, with the same size limit as other clients. No parallel preference table or anonymous storage bucket is introduced. Extension uploads replay retained daily snapshots with the existing per-device upsert key, so retrying does not create duplicate activity.
+

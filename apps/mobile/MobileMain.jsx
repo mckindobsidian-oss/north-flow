@@ -1,3 +1,4 @@
+import { themeStyles } from './themeStyles.js';
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { ActivityIndicator, Alert, AppState, Image, Linking, Modal, PermissionsAndroid, Platform, Pressable, RefreshControl, SafeAreaView, ScrollView, StyleSheet, Switch as NativeSwitch, Text, TextInput, View } from 'react-native';
 import Ionicons from './NorthIcon.jsx';
@@ -21,12 +22,12 @@ import { formatTaskDateInput, parseTaskDate, taskDateText } from '../../react-ap
 import { readUsageHistory, mergeUsageSources } from '../../react-app/src/lib/usage-history.js';
 import { isHiddenUsageSite } from '../../react-app/src/lib/analytics.js';
 const WALLS = Object.fromEntries(Object.entries(ENVIRONMENTS).map(([id, value]) => [id, value.image]));
-const TABS = [['home', 'home-outline', 'Home'], ['focus', 'timer-outline', 'Focus'], ['tasks', 'checkbox-outline', 'Tasks'], ['calendar', 'calendar-outline', 'Calendar'], ['flow', 'shield-outline', 'Flow'], ['social', 'people-outline', 'Social'], ['settings', 'settings-outline', 'Settings']];
+const TABS = [['home', 'home-outline', 'Home'], ['focus', 'timer-outline', 'Focus'], ['tasks', 'checkbox-outline', 'Tasks'], ['calendar', 'calendar-outline', 'Calendar'], ['flow', 'analytics-outline', 'Flow'], ['social', 'people-outline', 'Social'], ['settings', 'settings-outline', 'Settings']];
 const duration = seconds => {
   const n = Math.max(0, Math.round(seconds));
   return n >= 3600 ? `${Math.floor(n / 3600)}h ${Math.floor(n % 3600 / 60)}m` : n >= 60 ? `${Math.floor(n / 60)}m ${n % 60}s` : `${n}s`;
 };
-const dateKey = () => new Date().toISOString().slice(0, 10);
+const dateKey = () => localDay();
 function Button({
   children,
   onPress,
@@ -34,6 +35,7 @@ function Button({
   disabled,
   label
 }) {
+  const s = themeStyles(baseStyles, useMobileTheme().light);
   const { accent } = useMobileTheme();
   return <Pressable accessibilityRole="button" accessibilityLabel={label} accessibilityState={{ disabled: Boolean(disabled) }} disabled={disabled} onPress={onPress} style={({
     pressed
@@ -42,13 +44,14 @@ function Button({
   }, pressed && {
     opacity: .7
   }]}><Text style={[s.buttonText, secondary && {
-      color: '#f7f3ff'
+      color: s.text.color
     }]}>{children}</Text></Pressable>;
 }
 function Field({
   label,
   ...props
 }) {
+  const s = themeStyles(baseStyles, useMobileTheme().light);
   return <View style={{
     gap: 7,
     marginBottom: 12
@@ -57,12 +60,15 @@ function Field({
 function Card({
   children
 }) {
+  const s = themeStyles(baseStyles, useMobileTheme().light);
   return <View style={s.card}>{children}</View>;
 }
 function IconAction({ label, icon, onPress }) {
+  const s = themeStyles(baseStyles, useMobileTheme().light);
   return <Pressable accessibilityRole="button" accessibilityLabel={label} onPress={onPress} style={({ pressed }) => [s.iconButton, { borderRadius: 12, backgroundColor: '#ffffff14', borderWidth: 1, borderColor: '#ffffff30', opacity: pressed ? .65 : 1 }]}><Ionicons name={icon} size={22} /></Pressable>;
 }
 function Switch(props) {
+  const s = themeStyles(baseStyles, useMobileTheme().light);
   const { accent } = useMobileTheme();
   return <NativeSwitch trackColor={{ false: '#ffffff40', true: accent }} thumbColor="#fff" {...props} />;
 }
@@ -86,9 +92,11 @@ export default function MobileMain({
   user,
   onLogout
 }) {
+  const s = themeStyles(baseStyles, useMobileTheme().light);
   const insets=useSafeAreaInsets();
   const [tab, setTab] = useState('home');
   const [profile, setProfile] = useState(user);
+  Object.assign(s, themeStyles(baseStyles, profile.pm?.colorMode === 'light'));
   const [rows, setRows] = useState([]);
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState('');
@@ -219,10 +227,10 @@ export default function MobileMain({
   return <MobileBackdrop profile={profile}><View style={{
       flex: 1
     }}>
-    <ScrollView ref={scroll} contentContainerStyle={[s.body, { paddingTop: insets.top + 16 }]} keyboardShouldPersistTaps="handled" refreshControl={tab === 'flow' ? <RefreshControl refreshing={busy} onRefresh={() => refresh(true)} tintColor="#c3b0ff" /> : undefined}>
+    <ScrollView nestedScrollEnabled ref={scroll} contentContainerStyle={[s.body, { paddingTop: insets.top + 16 }]} keyboardShouldPersistTaps="handled" refreshControl={tab === 'flow' ? <RefreshControl refreshing={busy} onRefresh={() => refresh(true)} tintColor="#c3b0ff" /> : undefined}>
       {!['focus','home'].includes(tab) && <Text style={s.title}>{TABS.find(([id]) => id === tab)?.[2]}</Text>}
       {tab === 'flow' && <Button secondary disabled={busy} onPress={() => refresh(true)}>{busy ? 'Syncing…' : '↻ Refresh sync'}</Button>}
-      {tab === 'home' && <><Text style={s.hero}>Hi, {profile.name || user.name} 👋</Text><Text style={s.muted}>Make room for what matters.</Text><Pressable accessibilityRole="button" onPress={() => setTab('focus')} style={[s.card, s.row]}><View style={{ flex: 1 }}><Text style={s.subtitle}>Start focus session</Text><Text style={s.muted}>{profile.pm?.w || 25} min · Pomodoro</Text></View><Ionicons name="play-circle" size={48} color="#fff" /></Pressable><Card><View style={s.sectionHeading}><Text style={s.subtitle}>Today</Text><Pressable accessibilityRole="button" onPress={() => setTab('calendar')} style={s.iconButton}><Text style={s.text}>Calendar →</Text></Pressable></View>{tasks.filter(t => !t.completed && (!t.due || t.due <= localDay())).slice(0, 5).map(t => <Text key={t.id} style={s.text}>○ {t.title}</Text>)}<Text style={s.small}>{tasks.filter(t => !t.completed && (!t.due || t.due <= localDay())).length === 0 ? 'All clear for today.' : 'Choose a task in Focus to get started.'}</Text></Card><FocusHistory user={user} /><MobileStreak days={profile.streakDays} onFocus={() => setTab('focus')} onTasks={() => setTab('tasks')} /></>}
+      {tab === 'home' && <><Text style={s.hero}>Hi, {profile.name || user.name} 👋</Text><Text style={s.muted}>Make room for what matters.</Text><Pressable accessibilityRole="button" onPress={() => setTab('focus')} style={[s.card, s.row]}><View style={{ flex: 1 }}><Text style={s.subtitle}>Start focus session</Text><Text style={s.muted}>{profile.pm?.w || 25} min · Pomodoro</Text></View><Ionicons name="play-circle" size={48} color={s.text.color} /></Pressable><Card><View style={s.sectionHeading}><Text style={s.subtitle}>Today</Text><Pressable accessibilityRole="button" onPress={() => setTab('calendar')} style={s.iconButton}><Text style={s.text}>Calendar →</Text></Pressable></View>{tasks.filter(t => !t.completed && (!t.due || t.due <= localDay())).slice(0, 5).map(t => <Text key={t.id} style={s.text}>○ {t.title}</Text>)}<Text style={s.small}>{tasks.filter(t => !t.completed && (!t.due || t.due <= localDay())).length === 0 ? 'All clear for today.' : 'Choose a task in Focus to get started.'}</Text></Card><FocusHistory user={user} /><MobileStreak days={profile.streakDays} onFocus={() => setTab('focus')} onTasks={() => setTab('tasks')} /></>}
       <View style={tab === 'focus' ? undefined : {
           display: 'none'
         }}><MobileFocus user={user} profile={profile} save={save} onMessage={setMessage} /></View>
@@ -244,6 +252,7 @@ function MobileTasks({
   onMessage,
   onOpenEditor
 }) {
+  const s = themeStyles(baseStyles, useMobileTheme().light);
   const [title, setTitle] = useState('');
   const [due, setDue] = useState('');
   const [priority, setPriority] = useState('medium');
@@ -331,7 +340,7 @@ function MobileTasks({
         }])} />
       </View>
     </Card>)}
-    <MobileSpotify />
+    <MobileSpotify profile={profile} save={save} />
   </>;
 }
 function MobileFocus({
@@ -340,6 +349,7 @@ function MobileFocus({
   save,
   onMessage
 }) {
+  const s = themeStyles(baseStyles, useMobileTheme().light);
   const pm = {
     w: 25,
     sb: 5,
@@ -504,7 +514,7 @@ function MobileFocus({
   const phaseTabs = <View accessibilityLabel="Pomodoro phase" style={s.phaseTabs}>{phases.map((name, index) => <Pressable key={name} accessibilityRole="tab" accessibilityState={{ selected: phase === index }} onPress={() => choosePhase(index)} style={[s.phaseTab, phase === index && { borderColor: phaseColors[index], backgroundColor: `${phaseColors[index]}20` }]}><Text style={[s.phaseText, phase === index && { color: phaseColors[index] }]}>{name}</Text></Pressable>)}</View>;
   const dial = <><MobileFlipClock />{phaseTabs}<MobileFocusClock seconds={left} total={deadline || started.current ? planned.current : durations[phase]} phase={phases[phase]} color={phaseColors[phase]} />{controls}</>;
   return <>
-    <View style={s.sectionHeading}><View style={s.row}><Pressable accessibilityRole="button" accessibilityLabel="Enter focus mode" onPress={() => setImmersive(true)} style={s.iconButton}><Ionicons name="expand-outline" size={19} color="#fff" /></Pressable><Text style={s.title}>Focus</Text></View><Pressable accessibilityRole="button" accessibilityLabel="Session settings" accessibilityState={{ expanded: settings }} onPress={() => setSettings(!settings)} style={s.iconButton}><Ionicons name="settings-outline" size={19} color="#fff" /></Pressable></View>
+    <View style={s.sectionHeading}><View style={s.row}><Pressable accessibilityRole="button" accessibilityLabel="Enter focus mode" onPress={() => setImmersive(true)} style={s.iconButton}><Ionicons name="expand-outline" size={19} color={s.text.color} /></Pressable><Text style={s.title}>Focus</Text></View><Pressable accessibilityRole="button" accessibilityLabel="Session settings" accessibilityState={{ expanded: settings }} onPress={() => setSettings(!settings)} style={s.iconButton}><Ionicons name="settings-outline" size={19} color={s.text.color} /></Pressable></View>
     <Text style={s.small}>Working on</Text><Pressable accessibilityRole="button" accessibilityLabel="Choose focus task" onPress={() => setPicker(true)} style={[s.input, s.row]}><Text style={[s.text, { flex: 1 }]}>{(profile.tasks || []).find(t => t.id === taskId && !t.completed)?.title || 'No task — just focus'}</Text><Ionicons name="chevron-down" size={17} color="#ddd8e8" /></Pressable>
     {dial}
       {taskId && (profile.tasks || []).some(t => t.id === taskId && !t.completed) && <Button secondary onPress={async () => {
@@ -532,8 +542,8 @@ function MobileFocus({
             [key]: Math.min(120, pm[key] + 1)
           }
         })}>+</Button></View>)}</Card>}
-    <MobileSpotify />
-    <Modal visible={immersive} animationType="fade" onRequestClose={() => setImmersive(false)}><MobileBackdrop profile={profile}><SafeAreaView style={{ flex: 1 }}><View style={{ alignItems: 'flex-start', paddingTop: 20, paddingHorizontal: 12 }}><Pressable accessibilityRole="button" accessibilityLabel="Exit focus mode" onPress={() => setImmersive(false)} style={s.iconButton}><Ionicons name="close" size={25} color="#fff" /></Pressable></View><ScrollView contentContainerStyle={[s.body, { flexGrow: 1, justifyContent: 'center', paddingBottom: 32 }]}><Text style={[s.muted, { textAlign: 'center' }]}>{(profile.tasks || []).find(t => t.id === taskId && !t.completed)?.title ? `Working on ${(profile.tasks || []).find(t => t.id === taskId)?.title}` : 'Make room for what matters.'}</Text>{dial}</ScrollView></SafeAreaView></MobileBackdrop></Modal>
+    <MobileSpotify profile={profile} save={save} />
+    <Modal visible={immersive} animationType="fade" onRequestClose={() => setImmersive(false)}><MobileBackdrop profile={profile}><SafeAreaView style={{ flex: 1 }}><View style={{ alignItems: 'flex-start', paddingTop: 20, paddingHorizontal: 12 }}><Pressable accessibilityRole="button" accessibilityLabel="Exit focus mode" onPress={() => setImmersive(false)} style={s.iconButton}><Ionicons name="close" size={25} color={s.text.color} /></Pressable></View><ScrollView contentContainerStyle={[s.body, { flexGrow: 1, justifyContent: 'center', paddingBottom: 32 }]}><Text style={[s.muted, { textAlign: 'center' }]}>{(profile.tasks || []).find(t => t.id === taskId && !t.completed)?.title ? `Working on ${(profile.tasks || []).find(t => t.id === taskId)?.title}` : 'Make room for what matters.'}</Text>{dial}</ScrollView></SafeAreaView></MobileBackdrop></Modal>
     <Modal transparent visible={picker} animationType="fade" onRequestClose={() => setPicker(false)}><View style={s.modal}><View style={s.sheet}><Text style={s.subtitle}>Choose a task</Text><ScrollView><Button secondary onPress={() => {
               setTaskId('');
               setPicker(false);
@@ -546,6 +556,7 @@ function MobileFocus({
 function MobileCalendar({
   tasks
 }) {
+  const s = themeStyles(baseStyles, useMobileTheme().light);
   const { accent } = useMobileTheme();
   const [month, setMonth] = useState(() => new Date(new Date().getFullYear(), new Date().getMonth(), 1));
   const [selected, setSelected] = useState(localDay());
@@ -572,6 +583,7 @@ function MobileCalendar({
 function FocusHistory({
   user
 }) {
+  const s = themeStyles(baseStyles, useMobileTheme().light);
   const [days, setDays] = useState([]);
   const [revision, setRevision] = useState(0);
   useEffect(() => subscribeStore(key => {
@@ -596,13 +608,13 @@ function FocusHistory({
       live = false;
     };
   }, [user.un, revision]);
-  return <Card><Text style={s.subtitle}>Focus activity · 4 weeks</Text><View style={s.wrap}>{days.map(d => <Pressable accessibilityLabel={`${d.day}: ${duration(d.seconds)}`} key={d.day} onPress={() => Alert.alert(d.day, duration(d.seconds) + ' focused')} style={{
-        width: 24,
-        height: 24,
+  return <Card><Text style={s.subtitle}>Daily focus activity · last 28 days</Text><View style={s.wrap}>{days.map(d => <Pressable accessibilityLabel={`${d.day}: ${duration(d.seconds)}`} key={d.day} onPress={() => Alert.alert(d.day, duration(d.seconds) + ' focused')} style={{
+        width: 30,
+        height: 30,
         borderRadius: 5,
         backgroundColor: d.seconds ? '#c3b0ff' : '#ffffff1c',
         opacity: d.seconds ? Math.min(1, .3 + d.seconds / 5400) : 1
-      }} />)}</View></Card>;
+      }}><Text style={{color:d.seconds ? '#211b32' : '#eee',fontSize:10,textAlign:'center',marginTop:7}}>{Number(d.day.slice(-2))}</Text></Pressable>)}</View></Card>;
 }
 function MobileFlow({
   user,
@@ -610,11 +622,13 @@ function MobileFlow({
   save,
   rows
 }) {
+  const s = themeStyles(baseStyles, useMobileTheme().light);
   const [from, setFrom] = useState(dateKey());
   const [to, setTo] = useState(dateKey());
   const [creating, setCreating] = useState(false);
   const [target, setTarget] = useState(null);
   const [customTarget, setCustomTarget] = useState('');
+  const [targetsOpen, setTargetsOpen] = useState(false);
   const [mode, setMode] = useState('daily');
   const [minutes, setMinutes] = useState('25');
   const [name, setName] = useState('');
@@ -658,7 +672,7 @@ function MobileFlow({
       })}>Remove</Button></Card>)}{blocking.usageLimits.map(limit => <Card key={limit.id}><Text style={s.text}>{limit.name || limit.target}</Text><Text style={s.small}>{limit.kind} · {limit.dailyLimitMinutes}m · {limit.mode}</Text><Button secondary onPress={() => save({
         blocking: removeUsageLimit(blocking, limit.id)
       })}>Remove</Button></Card>)}
-    <Modal visible={creating} animationType="slide" onRequestClose={() => setCreating(false)}><SafeAreaView style={s.modalPage}><ScrollView contentContainerStyle={s.body}><Text style={s.title}>Create a usage limit</Text><Text style={s.subtitle}>1 · Choose an observed website or app</Text>{targets.map(t => <Button secondary={target?.name !== t.name || target?.kind !== t.kind} key={`${t.kind}:${t.name}`} onPress={() => setTarget(t)}>{t.name} · {t.kind}</Button>)}{!targets.length && <Text style={s.muted}>Tracked websites and apps appear here after account sync. Open tracking setup in Settings to discover Android apps. You can also enter a website below.</Text>}<Field label="Or enter a website" value={customTarget} onChangeText={value => { setCustomTarget(value); const host=value.trim().toLowerCase().replace('https://','').replace('http://','').split('/')[0]; setTarget(host ? {kind:'website',name:host}:null); }} autoCapitalize="none" /><Text style={s.subtitle}>2 · Choose how to limit it</Text>{[['permanent', 'Block permanently'], ['scheduled', 'Block on a schedule'], ['daily', 'Daily allowance'], ['session', 'Per-session allowance']].map(([id, label]) => <Button key={id} secondary={mode !== id} onPress={() => setMode(id)}>{label}</Button>)}{['daily', 'session'].includes(mode) && <Field label="Minutes" value={minutes} onChangeText={v => setMinutes(v.replace(/\D/g, '').slice(0, 4))} keyboardType="number-pad" />}{mode === 'scheduled' && <><View style={s.wrap}>{WEEKDAY_LABELS.map((label, i) => <Button key={i} secondary={!days.includes(i)} onPress={() => setDays(days.includes(i) ? days.filter(d => d !== i) : [...days, i])}>{label}</Button>)}</View><Field label="Start · HH:MM" value={start} onChangeText={setStart} maxLength={5} /><Field label="End · HH:MM" value={end} onChangeText={setEnd} maxLength={5} /></>}<Field label="3 · Limit name" value={name} onChangeText={setName} />{error ? <Text style={s.error}>{error}</Text> : null}<Button onPress={async () => {
+    <Modal visible={creating} animationType="slide" onRequestClose={() => setCreating(false)}><SafeAreaView style={s.modalPage}><ScrollView contentContainerStyle={s.body}><Text style={s.title}>Create a usage limit</Text><Text style={s.subtitle}>1 · Choose an observed website or app</Text><Button secondary onPress={() => setTargetsOpen(!targetsOpen)}>{targetsOpen ? 'Close list' : target?.name || 'Choose website or app ▾'}</Button>{targetsOpen && targets.map(t => <Button secondary={target?.name !== t.name || target?.kind !== t.kind} key={`${t.kind}:${t.name}`} onPress={() => { setTarget(t); setTargetsOpen(false); }}>{t.name} · {t.kind}</Button>)}{!targets.length && <Text style={s.muted}>Tracked websites and apps appear here after account sync. Open tracking setup in Settings to discover Android apps. You can also enter a website below.</Text>}<Field label="Or enter a website" value={customTarget} onChangeText={value => { setCustomTarget(value); const host=value.trim().toLowerCase().replace('https://','').replace('http://','').split('/')[0]; setTarget(host ? {kind:'website',name:host}:null); }} autoCapitalize="none" /><Text style={s.subtitle}>2 · Choose how to limit it</Text>{[['permanent', 'Block permanently'], ['scheduled', 'Block on a schedule'], ['daily', 'Daily allowance'], ['session', 'Per-session allowance']].map(([id, label]) => <Button key={id} secondary={mode !== id} onPress={() => setMode(id)}>{label}</Button>)}{['daily', 'session'].includes(mode) && <Field label="Minutes" value={minutes} onChangeText={v => setMinutes(v.replace(/\D/g, '').slice(0, 4))} keyboardType="number-pad" />}{mode === 'scheduled' && <><View style={s.wrap}>{WEEKDAY_LABELS.map((label, i) => <Button key={i} secondary={!days.includes(i)} onPress={() => setDays(days.includes(i) ? days.filter(d => d !== i) : [...days, i])}>{label}</Button>)}</View><Field label="Start · HH:MM" value={start} onChangeText={setStart} maxLength={5} /><Field label="End · HH:MM" value={end} onChangeText={setEnd} maxLength={5} /></>}<Field label="3 · Limit name" value={name} onChangeText={setName} />{error ? <Text style={s.error}>{error}</Text> : null}<Button onPress={async () => {
             if (!target) return setError('Choose an item.');
             const maximum = mode === 'session' ? 240 : 1440;
             if ((mode === 'daily' || (mode === 'session' && target.kind === 'app')) && (!Number(minutes) || Number(minutes) > maximum)) return setError(`Choose between 1 and ${maximum} minutes.`);
@@ -705,6 +719,7 @@ function MobileSocial({
   user,
   onMessage
 }) {
+  const s = themeStyles(baseStyles, useMobileTheme().light);
   const [name, setName] = useState('');
   const [requests, setRequests] = useState([]);
   const [feed, setFeed] = useState([]);
@@ -733,7 +748,7 @@ function MobileSocial({
   };
   return <><Card><View style={s.row}><Ionicons name="trophy" /><Text style={s.subtitle}>Global focus leaderboard</Text></View>{ranking.find(r => r.un === user.un) && <Text style={s.hero}>Your rank #{ranking.find(r => r.un === user.un).rank || ranking.findIndex(r => r.un === user.un) + 1}</Text>}<Text style={s.small}>Ranked by recorded focus time across North.</Text>{rankError ? <Text style={s.error}>{rankError}</Text> : ranking.map((r,i) => <View key={r.un} style={s.usageRow}><Text style={s.text}>#{r.rank || i+1}</Text><Text style={[s.text,{flex:1}]}>{r.name || r.un}{r.un === user.un ? ' · you' : ''}</Text><Text style={s.text}>{duration(r.fm * 60)}</Text></View>)}<Button secondary onPress={() => load().catch(e => onMessage(e.message))}>Refresh rankings</Button></Card><Card><Field label="Friend’s North username" value={name} onChangeText={setName} autoCapitalize="none" /><Button onPress={() => act(name.trim().toLowerCase(), 'request')}>Add friend</Button></Card>{requests.map((r, i) => <Card key={`${r.un}:${i}`}><Text style={s.text}>{r.un} · {r.direction}</Text>{r.direction === 'incoming' ? <View style={s.wrap}><Button onPress={() => act(r.un, 'accept')}>Accept</Button><Button secondary onPress={() => act(r.un, 'reject')}>Decline</Button></View> : <Button secondary onPress={() => act(r.un, 'cancel')}>Cancel request</Button>}</Card>)}{feed.map((f, i) => <Card key={f.un || i}><Text style={s.subtitle}>{f.name || f.un}</Text><Text style={s.muted}>{f.focus_minutes ?? f.fm ?? 0} focused minutes</Text><Button secondary onPress={() => act(f.un, 'remove')}>Remove friend</Button></Card>)}</>;
 }
-const s = StyleSheet.create({
+const baseStyles = StyleSheet.create({
   root: {
     flex: 1,
     backgroundColor: '#171121'
@@ -932,10 +947,11 @@ const s = StyleSheet.create({
   },
   grid: {
     flexDirection: 'row',
-    flexWrap: 'wrap'
+    flexWrap: 'wrap',
+    paddingVertical: 12
   },
   day: {
-    width: '14.2857%',
+    width: '14.28%',
     height: 48,
     alignItems: 'center',
     justifyContent: 'center',

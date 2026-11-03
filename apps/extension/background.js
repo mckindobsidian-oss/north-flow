@@ -153,7 +153,7 @@ const KEYS_KEY = "northSupabaseAnonKey";
 
 const rest = (url, anonKey) => `${String(url).replace(/\/+$/, "")}/rest/v1`;
 
-async function authContext() {    const [{ [KEY.account]: account }, { [KEYS_URL]: url }, { [KEYS_KEY]: anonKey }] = await Promise.all([
+async function authContext() { await authReady; const [{ [KEY.account]: account }, { [KEYS_URL]: url }, { [KEYS_KEY]: anonKey }] = await Promise.all([
       chrome.storage.local.get(KEY.account),
       chrome.storage.local.get(KEYS_URL),
       chrome.storage.local.get(KEYS_KEY),
@@ -229,6 +229,7 @@ async function syncAccount() {
     if (!profile) return { ok: false, reason: "no_profile" };
     await chrome.storage.local.set({ northInterfaceSounds: Boolean(profile.settings?.pm?.interfaceSounds) });
     await chrome.storage.local.set({ northAppearance: profile.settings?.appearance || null });
+    await chrome.storage.local.set({ northColorMode: profile.settings?.pm?.colorMode || 'dark' });
     const theme = profile.settings?.theme;
     if (typeof theme === "string" && /^[a-z][a-z0-9-]{1,40}$/.test(theme)) {
       await chrome.storage.local.set({ [KEY.theme]: theme });
@@ -368,7 +369,7 @@ async function syncUsage() {
     const hourlyUsage = (await chrome.storage.local.get(KEY.hourlyUsage))[KEY.hourlyUsage] || {};
     const today = new Date().toISOString().slice(0, 10);
     const dates = Object.keys(usage)
-      .filter((d) => d <= today && (d === today || !done || d > done))
+      .filter((d) => d <= today)
       .sort();
     for (const day of dates) {
       const rows = Object.entries(usage[day] || {})
@@ -1116,6 +1117,17 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
       case "authStatus": {
         const user = await northAuth.getSessionUser();
         return { ok: true, authed: Boolean(user), email: user?.email ?? null, configured: northAuth.isConfigured() };
+      }
+      case "setColorMode": {
+        const ctx = await authContext();
+        if (!ctx) return {ok:false,error:'Connect to North to save appearance.'};
+        const rows = await postgrest(`/profiles?id=eq.${ctx.uid}&select=settings`,ctx);
+        if (!rows?.[0]) return {ok:false,error:'Account unavailable.'};
+        const settings = rows[0].settings || {};
+        const colorMode = msg.light ? 'light' : 'dark';
+        await postgrest(`/profiles?id=eq.${ctx.uid}`,{...ctx,method:'PATCH',body:{settings:{...settings,pm:{...settings.pm,colorMode}}}});
+        await chrome.storage.local.set({northColorMode:colorMode});
+        return {ok:true};
       }
 
       case "authSetConfig": {

@@ -13,7 +13,7 @@ import { isDesktop } from "./lib/desktop.js";
 import {
   Calendar, Check, ChevronLeft, ChevronRight, Compass,
   Home as HomeIcon, ListChecks, LogOut, Pause, PenLine, Play,
-  Plus, RotateCcw, Settings, Shield, SkipForward, Timer, Trash2, Users, X, Eye, EyeOff, Maximize2
+  Plus, RotateCcw, Settings, ChartNoAxesCombined, Shield, SkipForward, Timer, Trash2, Users, X, Eye, EyeOff, Maximize2
 } from "lucide-react";
 import { supabase, supabaseConfigured, normalizedUrl, supabaseAnonKey } from "./lib/supabase.js";
 import { authEventUser, cachedSessionUser } from "./lib/auth-events.js";
@@ -360,7 +360,7 @@ const GLASS_ENV = (envId, photo) => {
     position: "relative",
     // Consumed by .envwall / .envwall::after (see `G`).
     "--envWall": `url("${e.img}")`,
-    "--envScrim": e.scrim,
+    "--envScrim": K.dark ? e.scrim : 'rgba(248,249,255,.86)',
   };
 };
 // Full-viewport photo layer for the custom environment. Fixed-position so it
@@ -825,7 +825,7 @@ const G = () => (
     }
     .envphoto::after {
       content: ""; position: absolute; inset: 0;
-      background: rgba(8, 10, 16, var(--envDim, 0.35));
+      background: ${K.dark ? 'rgba(8, 10, 16, var(--envDim, 0.35))' : 'rgba(248,249,255,.86)'};
     }
     /* Built-in wallpaper. One fixed layer holding the ACTIVE environment's
        photograph (URL + scrim arrive as the --envWall/--envScrim custom
@@ -1490,17 +1490,17 @@ function StreakProgress({ user, go }) {
   const progress = streakSummary(user.streakDays, now);
   const goals = Number(Boolean(progress.today.focus)) + Number(Boolean(progress.today.task));
   return <section className={`north-streak${progress.lit ? " is-lit" : ""}`} style={{ ...card(), marginBottom: 22 }}>
-    <div className="north-streak-kicker">YOUR DAILY SPARK <span>PERSONAL BEST · {progress.best} DAYS</span></div>
+    <div className="north-streak-kicker">STREAK <span>PERSONAL BEST · {progress.best} DAYS</span></div>
     <button className="b" type="button" onClick={() => setExpanded(!expanded)} aria-expanded={expanded} style={{ color: K.txt, width: "100%", textAlign: "left", display: "flex", alignItems: "center", gap: 14 }}>
       <span className="north-streak-flame" aria-hidden="true">🔥</span>
       <span style={{ flex: 1 }}><strong className="north-streak-count">{progress.current}<small> day{progress.current === 1 ? '' : 's'}</small></strong><span style={{ display: "block", color: K.sub, marginTop: 4, fontSize: 13 }}>{progress.lit ? "Flame lit. A little focus, a little closer." : goals ? "Halfway there. One more goal lights your flame." : progress.current ? "Keep your flame going. Make today count." : "Every streak starts with a spark."}</span></span>
       <span style={{ color: K.sub, fontSize: 12 }}>{expanded ? "Hide rewards −" : "Rewards +"}</span>
     </button>
-    <div className="north-streak-goals">
+    <div className="north-streak-goals" hidden={!expanded} style={{display:expanded ? undefined : 'none'}}>
       <button type="button" className={`b${progress.today.focus ? ' complete' : ''}`} onClick={() => go('focus')}>{progress.today.focus ? '✓' : '◷'}<span>Complete a Pomodoro<small>{progress.today.focus ? 'Today’s focus goal complete' : 'Give one session your full attention'}</small></span><span aria-hidden="true">→</span></button>
       <button type="button" className={`b${progress.today.task ? ' complete' : ''}`} onClick={() => go('tasks')}>{progress.today.task ? '✓' : '○'}<span>Finish one task<small>{progress.today.task ? 'Today’s task goal complete' : 'Turn a small intention into progress'}</small></span><span aria-hidden="true">→</span></button>
     </div>
-    <progress className="north-daily-progress" aria-label={`${goals} of 2 daily streak goals complete`} max="2" value={goals} />
+    {expanded && <progress className="north-daily-progress" aria-label={`${goals} of 2 daily streak goals complete`} max="2" value={goals} />}
     <div className="north-streak-week">{Array.from({ length: 7 }, (_, index) => {
       const date = new Date(now); date.setDate(date.getDate() - 6 + index); const key = localDay(date);
       const earned = user.streakDays?.[key]?.focus && user.streakDays?.[key]?.task;
@@ -2405,7 +2405,7 @@ function Focus({ user, envId, envPhoto, go, active = true }) {
   // Spotify rides along inside immersive mode only — a quiet strip under the
   // dial. Renders nothing when not connected (spotifyControl failure paths
   // are honest text, never faked playback).
-  const spotifyMini = <div className="north-spotify-float" style={{ "--spotify-surface": GK.tintStrong, "--spotify-edge": GK.edge, "--spotify-ink": K.txt, "--spotify-highlight": GK.hi }}><SpotifyFloatingPlayer /></div>;
+  const spotifyMini = <div className="north-spotify-float" style={{ "--spotify-surface": GK.tintStrong, "--spotify-edge": GK.edge, "--spotify-ink": K.txt, "--spotify-highlight": GK.hi }}><SpotifyFloatingPlayer user={user} /></div>;
 
   const phaseTabs = <div className="focus-phase-tabs" role="group" aria-label="Pomodoro phase" style={{ display: "flex", gap: 6, margin: "0 auto 18px", width: "min(100%, 620px)" }}>
     {F_NAMES.map((name, index) => (
@@ -4256,6 +4256,7 @@ function Blocking({ user }) {
             <button className="b" type="button" aria-label="Close" onClick={() => setShowLimitCreate(false)} style={{ padding: 6, color: K.sub }}><X size={17} /></button>
           </div>
           <label style={{ display: "block", color: K.txt, fontSize: 12, fontWeight: 600, marginBottom: 7 }}>1 · Websites and desktop apps you’ve used</label>
+          <details style={{color:K.txt,marginBottom:12}}><summary style={{cursor:'pointer',padding:12,border:`1px solid ${K.border}`,borderRadius:12}}>Choose websites and apps · {selectedTargets.length} selected</summary>
           <input autoFocus style={{ ...inpSt(), marginBottom: 8 }} placeholder="Search usage history" aria-label="Search websites and desktop apps" value={createSearch} onChange={(event) => setCreateSearch(event.target.value)} />
           <div style={{ maxHeight: 205, overflowY: "auto", border: `1px solid ${K.border}`, borderRadius: 12, padding: "4px 10px" }}>
             {availableTargets.length ? availableTargets.map((target) => {
@@ -4271,6 +4272,7 @@ function Blocking({ user }) {
             }) : <div style={{ padding: 14, color: K.sub, fontSize: 11.5 }}>No recorded activity yet. Visit a site or use an app, then come back here.</div>}
           </div>
           <div style={{ color: K.sub, fontSize: 10.5, margin: "6px 0 16px" }}>Selected {selectedTargets.length} · connected North clients enforce the targets they can control.</div>
+          </details>
           <label style={{ display: "block", color: K.txt, fontSize: 12, fontWeight: 600, marginBottom: 8 }}>2 · Choose a limit type</label>
           <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(210px,1fr))", gap: 7 }}>
             {[["permanent", "Block permanently", "Keep blocked until you remove this limit."], ["scheduled", "Block on a schedule", "Block during selected days and hours."], ["daily", "Daily usage limit", "Block once today’s allowance is used."], ["session", "Session limit", "Browser visits ask for an allowance. Apps use the allowance below until closed."]].map(([value, title, hint]) => (
@@ -4753,12 +4755,13 @@ function spotifyEmbed(url) {
     if (parsed.hostname !== "open.spotify.com") return null;
     const [, type, id] = parsed.pathname.split("/");
     if (!/^(playlist|album|track|artist|show|episode)$/.test(type || "") || !/^[A-Za-z0-9]+$/.test(id || "")) return null;
-    return { src: `https://open.spotify.com/embed/${type}/${id}?utm_source=generator&theme=0`, height: ["playlist", "album", "artist", "show"].includes(type) ? 352 : 152 };
+    return { src: `https://open.spotify.com/embed/${type}/${id}?utm_source=generator&theme=${K.dark ? 0 : 1}`, height: ["playlist", "album", "artist", "show"].includes(type) ? 352 : 152 };
   } catch { return null; }
 }
 
 /** Floating player using Spotify's official interactive Embed. */
-function SpotifyFloatingPlayer() {
+function SpotifyFloatingPlayer({ user }) {
+
   const [url, setUrl] = useState(() => { try { return localStorage.getItem(SPOTIFY_EMBED_KEY) || DEFAULT_SPOTIFY_PLAYLIST; } catch { return DEFAULT_SPOTIFY_PLAYLIST; } });
   const [minimized, setMinimized] = useState(() => {
     try { return window.matchMedia("(max-width: 600px)").matches; }
@@ -4767,6 +4770,7 @@ function SpotifyFloatingPlayer() {
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState(() => { try { return localStorage.getItem(SPOTIFY_EMBED_KEY) || DEFAULT_SPOTIFY_PLAYLIST; } catch { return DEFAULT_SPOTIFY_PLAYLIST; } });
   const [error, setError] = useState("");
+  useEffect(() => { const next = user?.pm?.spotifyPlaylist || DEFAULT_SPOTIFY_PLAYLIST; setUrl(next); setDraft(next); }, [user?.un, user?.pm?.spotifyPlaylist]);
   useEffect(() => {
     const narrow = window.matchMedia("(max-width: 820px)");
     const adapt = () => { if (narrow.matches) setMinimized(true); };
@@ -4793,6 +4797,7 @@ function SpotifyFloatingPlayer() {
       <button type="button" className="b" onClick={() => {
         if (draft && !spotifyEmbed(draft)) { setError("Use a Spotify share link from open.spotify.com."); return; }
         const next = draft.trim() || DEFAULT_SPOTIFY_PLAYLIST;
+        if (user?.un) { S.get(PROFILE_KEY(user.un)).then(async profile => { if (profile) { await S.set(PROFILE_KEY(user.un), { ...profile, pm: { ...profile.pm, spotifyPlaylist: next } }); await SYNC.flushProfile(user.un); } }).catch(() => setError('Could not save playlist to account. Try again.')); }
         try { next ? localStorage.setItem(SPOTIFY_EMBED_KEY, next) : localStorage.removeItem(SPOTIFY_EMBED_KEY); } catch {}
         setUrl(next);
         window.dispatchEvent(new CustomEvent("north:spotify-embed", { detail: next }));
@@ -4937,6 +4942,7 @@ function HiddenWebsiteSettings({ user }) {
 
 function SettingsScreen({ user, envId, envPhoto, onEnv, onPhoto, onPhotoAdj, onRemovePhoto, onLogout, onName }) {
   const [volume, setVolume] = useState(user.pm?.soundVolume ?? .5);
+  const changeColorMode = async () => { const key = PROFILE_KEY(user.un); const p = await S.get(key); if(p) { await S.set(key,{...p,pm:{...p.pm,colorMode:p.pm?.colorMode === "light" ? "dark" : "light"}}); await SYNC.flushProfile(user.un); } };
   const volumeWrites = useRef(Promise.resolve());
   useEffect(() => { setVolume(user.pm?.soundVolume ?? .5); }, [user.pm?.soundVolume]);
   const changeVolume = (event) => {
@@ -5004,6 +5010,7 @@ function SettingsScreen({ user, envId, envPhoto, onEnv, onPhoto, onPhotoAdj, onR
         <label style={{ display: "flex", alignItems: "center", gap: 12, marginTop: 12, fontSize: 13, color: K.sub }}>Volume <input type="range" aria-label="Completion sound volume" min="0" max="1" step=".05" value={volume} onChange={changeVolume} onPointerUp={() => playSound("task", volume)} style={{ flex: 1, accentColor: K.acc }} /><output>{Math.round(volume * 100)}%</output></label>
       </section>
       <HiddenWebsiteSettings user={user} />
+      <button className="b" type="button" onClick={changeColorMode} style={{ ...card(), padding: 16, color: K.txt, marginBottom: 16 }}>Appearance · {user.pm?.colorMode === 'light' ? 'Light' : 'Dark'} — switch theme</button>
 
       {/* Account */}
       <div style={{ ...card(), padding: "14px 16px", marginBottom: 12 }}>
@@ -5356,6 +5363,7 @@ export default function App() {
   PHOTO_CURRENT = usingPhoto ? envPhoto.adj : null;
   K = usingPhoto ? paletteForCustomPhoto(envPhoto.adj) : paletteOf(envId);
   GK = glassOf(usingPhoto ? "custom" : envId);
+  if (user?.pm?.colorMode === "light") { K = {...K, dark:false, txt:"#202330", sub:"#454b60", muted:"#5d6578", bg:"#f2f4fa", surf:"#f7f8fff0", card:"#f7f8fff0", card2:"#eceff8ee", border:"#20233030"}; GK = {...GK,tint:"#f7f8fff0",tintCard:"#f7f8fff0",tintSubtle:"#edf0f8ee",tintStrong:"#fafbff",edge:"#20233030"}; }
 
   useEffect(() => {
     try { localStorage.setItem("fl_env", envId); } catch {}
@@ -5831,7 +5839,7 @@ export default function App() {
     { id: "focus",    I: Timer,      lbl: "Focus"  },
     { id: "tasks",    I: ListChecks, lbl: "Tasks"  },
     { id: "calendar", I: Calendar,   lbl: "Calendar" },
-    { id: "flow",     I: Shield,     lbl: "Flow"    },
+    { id: "flow",     I: ChartNoAxesCombined, lbl: "Flow"    },
     { id: "social",   I: Users,      lbl: "Social" },
     { id: "settings", I: Settings,   lbl: "Settings" },
   ];

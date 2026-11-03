@@ -71,7 +71,7 @@ async function refreshUsageRange() {
 function render() {
   const s = snapshot;
   if (!s) return;
-  applyTheme(s.theme, s.appearance);
+  chrome.storage.local.get('northColorMode').then(value => applyTheme(s.theme, s.appearance, {colorMode:value.northColorMode}));
 
   // Status (already phrased by the shared engine)
   $("statusIcon").textContent = s.status.active ? "●" : "○";
@@ -485,3 +485,5 @@ $("openNorth").onclick = async () => {
 
 refresh();
 setInterval(refresh, 30000); // keep the countdown and the verdict honest while open
+
+const modeButton = document.createElement("button"); modeButton.className="chip"; modeButton.textContent="Switch light / dark theme"; modeButton.addEventListener("click",async()=>{const old=await chrome.storage.local.get("northColorMode"); const result=await send({type:"setColorMode",light:old.northColorMode!=="light"}); if(result?.ok) render(); else {modeButton.textContent=result?.error || "Could not save appearance";}}); document.body.appendChild(modeButton);
